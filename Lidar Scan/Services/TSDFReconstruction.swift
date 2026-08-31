@@ -210,7 +210,7 @@ private struct TSDFVolume {
 
     // MARK: 表面提取（Surface-Nets，双面）
 
-    func extractSurface() -> ScanMeshData {
+    mutating func extractSurface() -> ScanMeshData {
         let d = dimension
         let count = d * d * d
 
