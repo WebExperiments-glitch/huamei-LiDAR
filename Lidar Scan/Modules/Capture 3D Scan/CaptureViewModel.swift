@@ -68,8 +68,11 @@ final class CaptureViewModel: NSObject, ObservableObject {
         let configuration = ARWorldTrackingConfiguration()
         configuration.environmentTexturing = .automatic
         configuration.planeDetection = [.horizontal, .vertical]
+        // 稳定性优先：使用纯 .mesh 场景重建。
+        // .meshWithClassification 会多挂一路语义分类更新器，与底层交互面更大，
+        // 在 iPadOS 27 上更易触发时序问题；纯网格对流更稳。
         if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
-            configuration.sceneReconstruction = .meshWithClassification
+            configuration.sceneReconstruction = .mesh
         }
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             configuration.frameSemantics = [.sceneDepth]
@@ -253,6 +256,14 @@ final class CaptureViewModel: NSObject, ObservableObject {
 
 extension CaptureViewModel: ARSessionDelegate {
 
+    /// 网格拷贝节流间隔（秒）：同一锚点距上次深拷贝不足该值则跳过，
+    /// 显著降低与 ARKit 底层缓冲纠缠的频率，也更省 CPU。
+    private static let ingestThrottle: TimeInterval = 0.3
+
+    /// 节流表（线程安全）
+    private nonisolated static let ingestLock = NSLock()
+    private nonisolated static var lastIngestTime: [UUID: TimeInterval] = [:]
+
     nonisolated func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         ingestMeshAnchors(anchors)
     }
@@ -271,11 +282,23 @@ extension CaptureViewModel: ARSessionDelegate {
     }
 
     private nonisolated func ingestMeshAnchors(_ anchors: [ARAnchor]) {
+        let now = ProcessInfo.processInfo.systemUptime
         for anchor in anchors {
             guard let mesh = anchor as? ARMeshAnchor else { continue }
             let identifier = mesh.identifier
-            // 回调窗口内深拷贝网格缓冲
+
+            // 节流：高频 didUpdate 时避免对同一锚点反复全量深拷贝
+            let shouldCopy = Self.ingestLock.withLock { () -> Bool in
+                let last = Self.lastIngestTime[identifier] ?? -Double.greatestFiniteMagnitude
+                guard now - last >= Self.ingestThrottle else { return false }
+                Self.lastIngestTime[identifier] = now
+                return true
+            }
+            guard shouldCopy else { continue }
+
+            // 回调窗口内深拷贝网格缓冲（官方安全时机）
             let snapshot = MeshExtractor.snapshot(of: mesh)
+            guard !snapshot.vertices.isEmpty else { continue }
             Task { @MainActor [weak self] in
                 self?.meshSnapshots[identifier] = snapshot
             }

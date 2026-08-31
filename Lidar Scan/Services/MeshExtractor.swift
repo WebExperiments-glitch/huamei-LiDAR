@@ -27,38 +27,50 @@ enum MeshExtractor {
 
     /// 在 ARSessionDelegate 回调内调用：把 anchor 的几何深拷贝出来。
     /// 此后可安全地在任意线程使用返回的值。
+    /// 含防御性校验：异常几何量级会被忽略（返回空快照），不参与后续流程。
     static func snapshot(of anchor: ARMeshAnchor) -> MeshAnchorSnapshot {
         let geometry = anchor.geometry
         let vertexCount = geometry.vertices.count
+        // 防御：数量异常（0 或超大）视为无效锚点，直接返回空快照
+        guard vertexCount > 0, vertexCount <= 5_000_000 else {
+            return MeshAnchorSnapshot(identifier: anchor.identifier,
+                                      transform: anchor.transform,
+                                      vertices: [],
+                                      normals: [],
+                                      faces: [])
+        }
 
         var vertices = [SIMD3<Float>](repeating: .zero, count: vertexCount)
         var normals = [SIMD3<Float>](repeating: .zero, count: vertexCount)
         var faces: [UInt32] = []
 
-        if vertexCount > 0 {
-            // 顶点（深拷贝为纯 Swift 数组）
-            let vertexPtr = geometry.vertices.buffer.contents()
-                .advanced(by: geometry.vertices.offset)
-                .assumingMemoryBound(to: SIMD3<Float>.self)
-            for i in 0..<vertexCount { vertices[i] = vertexPtr[i] }
+        // 顶点（深拷贝为纯 Swift 数组）
+        let vertexPtr = geometry.vertices.buffer.contents()
+            .advanced(by: geometry.vertices.offset)
+            .assumingMemoryBound(to: SIMD3<Float>.self)
+        for i in 0..<vertexCount { vertices[i] = vertexPtr[i] }
 
-            // 法线（可能存在也可能为空）
-            if geometry.normals.count == vertexCount {
-                let normalPtr = geometry.normals.buffer.contents()
-                    .advanced(by: geometry.normals.offset)
-                    .assumingMemoryBound(to: SIMD3<Float>.self)
-                for i in 0..<vertexCount { normals[i] = normalPtr[i] }
-            }
+        // 法线（可能存在也可能为空）
+        if geometry.normals.count == vertexCount {
+            let normalPtr = geometry.normals.buffer.contents()
+                .advanced(by: geometry.normals.offset)
+                .assumingMemoryBound(to: SIMD3<Float>.self)
+            for i in 0..<vertexCount { normals[i] = normalPtr[i] }
         }
 
-        // 面索引
+        // 面索引（仅支持 4 字节索引）
         let faceCount = geometry.faces.count
         let indicesPerFace = geometry.faces.indexCountPerPrimitive
         if faceCount > 0, indicesPerFace > 0, geometry.faces.bytesPerIndex == 4 {
             let total = faceCount * indicesPerFace
             faces.reserveCapacity(total)
             let ptr = geometry.faces.buffer.contents().assumingMemoryBound(to: UInt32.self)
-            for i in 0..<total { faces.append(ptr[i]) }
+            for i in 0..<total {
+                let index = ptr[i]
+                if Int(index) < vertexCount {   // 防御：丢弃越界索引
+                    faces.append(index)
+                }
+            }
         }
 
         return MeshAnchorSnapshot(identifier: anchor.identifier,
@@ -92,7 +104,9 @@ enum MeshExtractor {
             }
 
             for index in snapshot.faces {
-                data.faces.append(index + globalBase)
+                if Int(index) < snapshot.vertices.count {   // 防御：丢弃越界索引
+                    data.faces.append(index + globalBase)
+                }
             }
         }
         return data
