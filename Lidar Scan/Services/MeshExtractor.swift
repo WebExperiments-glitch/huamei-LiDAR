@@ -67,17 +67,15 @@ enum MeshExtractor {
             }
         }
 
-        // 防御 4：面索引边界校验（仅支持 4 字节索引）
+        // 防御 4：面索引边界校验（仅支持 4 字节索引，元素缓冲无 offset）
         let faceCount = geometry.faces.count
         let indicesPerFace = geometry.faces.indexCountPerPrimitive
         if faceCount > 0, indicesPerFace > 0, geometry.faces.bytesPerIndex == 4 {
             let total = faceCount * indicesPerFace
             let indexBytes = geometry.faces.bytesPerIndex * total
-            if geometry.faces.offset + indexBytes <= geometry.faces.buffer.length {
+            if indexBytes <= geometry.faces.buffer.length {
                 faces.reserveCapacity(total)
-                let ptr = geometry.faces.buffer.contents()
-                    .advanced(by: geometry.faces.offset)
-                    .assumingMemoryBound(to: UInt32.self)
+                let ptr = geometry.faces.buffer.contents().assumingMemoryBound(to: UInt32.self)
                 for i in 0..<total {
                     let index = ptr[i]
                     if Int(index) < vertexCount {   // 防御：丢弃越界索引
