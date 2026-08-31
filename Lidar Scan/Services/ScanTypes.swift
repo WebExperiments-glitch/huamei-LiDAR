@@ -9,6 +9,7 @@ import Foundation
 import ARKit
 import CoreVideo
 import CoreGraphics
+import UIKit
 import simd
 
 // MARK: - 导出格式
@@ -82,28 +83,36 @@ struct ScanMeshData {
 }
 
 // MARK: - 帧快照（导出纹理时用于给顶点取色）
+//
+// 注意：此快照必须在 `ARSession.pause()` 之前、主线程上创建，
+// 并且只保留“值类型”数据（矩阵/像素缓冲的强引用）。
+// 禁止在暂停后继续访问 ARCamera / ARMeshAnchor 对象，否则会触发 UAF 闪退。
 
 struct FrameSnapshot {
-    let camera: ARCamera?
+    /// 按界面方向物化好的「世界→相机」视图矩阵（值拷贝，与 ARCamera 生命周期解耦）
+    let viewMatrix: simd_float4x4
+    /// 相机内参（fx/fy/cx/cy）
+    let intrinsics: simd_float3x3
+    /// 相机图像像素缓冲（强引用，可安全在后台读取）
     let image: CVPixelBuffer?
-    let intrinsics: simd_float3x3?
-    let viewport: CGSize
-    /// LiDAR 深度图（可空；仅当配置了 .sceneDepth 时才有）
+    /// LiDAR 深度图（可空）
     let depthMap: CVPixelBuffer?
     /// 深度置信度图（可空）
     let confidenceMap: CVPixelBuffer?
+    /// 图像像素尺寸
+    let viewport: CGSize
 
-    static func make(from frame: ARFrame?) -> FrameSnapshot? {
+    static func make(from frame: ARFrame?, orientation: UIInterfaceOrientation) -> FrameSnapshot? {
         guard let frame = frame else { return nil }
         let img = frame.capturedImage
         let viewport = CGSize(width: CVPixelBufferGetWidth(img),
                               height: CVPixelBufferGetHeight(img))
-        return FrameSnapshot(camera: frame.camera,
-                             image: img,
+        return FrameSnapshot(viewMatrix: frame.camera.viewMatrix(for: orientation),
                              intrinsics: frame.camera.intrinsics,
-                             viewport: viewport,
+                             image: img,
                              depthMap: frame.sceneDepth?.depthMap,
-                             confidenceMap: frame.sceneDepth?.confidenceMap)
+                             confidenceMap: frame.sceneDepth?.confidenceMap,
+                             viewport: viewport)
     }
 }
 

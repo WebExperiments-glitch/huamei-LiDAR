@@ -2,11 +2,17 @@
 //  CaptureViewModel.swift
 //  Lidar Scan (二次开发)
 //
-//  扫描会话管理：负责 ARKit 会话的启动/暂停/网格开关，
-//  以及「导出」全流程（快照 → 网格抽取 → 纹理取色 → 多格式写出）。
+//  扫描会话管理：会话启停、网格显示，以及
+//  「结束扫描 → 主线程物化数据 → 后台导出」的安全流程。
+//
+//  ⚠️ 防闪退红线：任何 ARKit 对象（ARMeshAnchor / ARCamera / 深度缓冲）
+//  都只能在「会话尚未暂停、主线程」时读取；读取结果必须物化为纯 Swift 值
+//  （数组 / 矩阵 / 像素缓冲强引用）后，才能交给后台线程处理。
+//  否则暂停瞬间 ARKit 会释放底层共享内存，后台读取即 UAF 闪退。
 //
 
 import SwiftUI
+import UIKit
 import RealityKit
 import ARKit
 import CoreVideo
@@ -16,6 +22,8 @@ final class CaptureViewModel: NSObject, ObservableObject {
     // MARK: - 发布状态
 
     @Published var isSessionRunning = true
+    /// 是否已完成「结束扫描」并物化好数据（只允许在已结束时导出）
+    @Published var isFinished = false
     @Published var showDebugMesh = true
     @Published var isExporting = false
     @Published var statusMessage: String?
@@ -28,6 +36,11 @@ final class CaptureViewModel: NSObject, ObservableObject {
 
     private var currentConfiguration: ARWorldTrackingConfiguration?
     private var didStartSession = false
+
+    // MARK: - 已物化的扫描数据（纯 Swift 值，可安全跨线程）
+
+    private var cachedMeshData: ScanMeshData?
+    private var cachedSnapshot: FrameSnapshot?
 
     // MARK: - 会话控制
 
@@ -52,8 +65,9 @@ final class CaptureViewModel: NSObject, ObservableObject {
         statusMessage = "请缓慢移动设备，扫描周围环境"
     }
 
-    /// 暂停 / 继续
+    /// 暂停 / 继续（扫描阶段）
     func toggleSession() {
+        guard !isFinished else { return }
         if isSessionRunning {
             arView.session.pause()
             isSessionRunning = false
@@ -68,9 +82,59 @@ final class CaptureViewModel: NSObject, ObservableObject {
         applyDebugState()
     }
 
-    /// 网格显示开关（彩色语义网格 / 纯净相机画面）
+    /// 网格显示开关
     func toggleDebugMesh() {
         showDebugMesh.toggle()
+        applyDebugState()
+    }
+
+    /// 结束扫描：主线程同步物化网格 + 相机快照，然后暂停会话。
+    /// 物化之后，后台线程绝不再触碰任何 ARKit 对象。
+    @discardableResult
+    func finishScan() -> Bool {
+        guard !isFinished else { return cachedMeshData != nil }
+        guard let frame = arView.session.currentFrame else {
+            alertMessage = "相机尚未就绪，请稍后再试"
+            return false
+        }
+
+        let anchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+        guard !anchors.isEmpty else {
+            alertMessage = "还没有捕捉到网格，请先扫描几秒再结束"
+            return false
+        }
+
+        // 前置：把相机矩阵按当前界面方向物化为值（再暂停就安全了）
+        let orientation = currentInterfaceOrientation()
+        let snapshot = FrameSnapshot.make(from: frame, orientation: orientation)
+
+        // 核心：同步抽取网格为纯 Swift 数组（此刻会话仍在运行，内存有效）
+        let meshData = MeshExtractor.extract(from: anchors)
+        guard !meshData.isEmpty else {
+            alertMessage = "网格数据为空，请重新扫描"
+            return false
+        }
+
+        arView.session.pause()
+        isSessionRunning = false
+        isFinished = true
+        cachedMeshData = meshData
+        cachedSnapshot = snapshot
+        statusMessage = "扫描已结束，模型已生成，可导出"
+        return true
+    }
+
+    /// 重新扫描：恢复会话并清掉缓存
+    func resumeScan() {
+        guard isFinished else { return }
+        if let configuration = currentConfiguration {
+            arView.session.run(configuration)
+        }
+        isSessionRunning = true
+        isFinished = false
+        cachedMeshData = nil
+        cachedSnapshot = nil
+        statusMessage = "扫描已继续"
         applyDebugState()
     }
 
@@ -90,31 +154,24 @@ final class CaptureViewModel: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - 导出
+    // MARK: - 导出（后台只处理已物化的值类型数据）
 
     func export(_ options: ExportOptions) {
         guard !isExporting else { return }
-        guard let frame = arView.session.currentFrame else {
-            alertMessage = "相机尚未就绪，请稍后再试"
+
+        // 未结束扫描？先结束（物化 + 暂停），保证数据快照一致性
+        guard finishScan() else { return }
+
+        guard let meshData = cachedMeshData else {
+            alertMessage = "模型数据为空，请重新扫描后再导出"
             return
         }
+        let snapshot = cachedSnapshot
 
-        let anchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
-        guard !anchors.isEmpty else {
-            alertMessage = "还没有捕捉到网格，请先扫描几秒再导出"
-            return
-        }
-
-        let snapshot = FrameSnapshot.make(from: frame)
-
-        // 先暂停会话并保留当前帧，再在后台做重活，避免卡 UI
-        arView.session.pause()
-        isSessionRunning = false
         isExporting = true
         statusMessage = "正在生成模型…"
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let meshData = MeshExtractor.extract(from: anchors)
             do {
                 let result = try ScanFileExporter.run(data: meshData,
                                                       options: options,
@@ -135,6 +192,15 @@ final class CaptureViewModel: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    // MARK: - 工具
+
+    private func currentInterfaceOrientation() -> UIInterfaceOrientation {
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+            return scene.interfaceOrientation
+        }
+        return .portrait
     }
 }
 

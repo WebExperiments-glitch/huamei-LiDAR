@@ -43,18 +43,51 @@ struct Capture3DScanView: View {
                 StatusChip(text: viewModel.statusMessage ?? "扫描中…",
                            isActive: viewModel.isSessionRunning)
 
-                HStack(spacing: 14) {
-                    GlassIconButton(systemImage: viewModel.isSessionRunning ? "pause.fill" : "play.fill") {
-                        viewModel.toggleSession()
+                if viewModel.isFinished {
+                    // 已结束：可重新扫描 或 导出
+                    HStack(spacing: 14) {
+                        GlassButton(title: "重新扫描",
+                                    systemImage: "arrow.counterclockwise") {
+                            viewModel.resumeScan()
+                        }
+                        GlassButton(title: "导出",
+                                    systemImage: "square.and.arrow.up",
+                                    prominent: true,
+                                    disabled: viewModel.isExporting) {
+                            showExportSheet = true
+                        }
                     }
-                    GlassIconButton(systemImage: viewModel.showDebugMesh ? "square.grid.3d.fill" : "eye.fill") {
-                        viewModel.toggleDebugMesh()
-                    }
-                    GlassButton(title: "导出",
-                                systemImage: "square.and.arrow.up",
-                                prominent: true,
-                                disabled: viewModel.isExporting) {
-                        showExportSheet = true
+                } else {
+                    // 扫描中：暂停/继续、网格开关、结束扫描、导出
+                    HStack(spacing: 14) {
+                        GlassIconButton(systemImage: viewModel.isSessionRunning ? "pause.fill" : "play.fill") {
+                            viewModel.toggleSession()
+                        }
+                        GlassIconButton(systemImage: viewModel.showDebugMesh ? "square.grid.3d.fill" : "eye.fill") {
+                            viewModel.toggleDebugMesh()
+                        }
+                        Button {
+                            _ = viewModel.finishScan()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "stop.fill")
+                                    .font(.system(size: 13, weight: .semibold))
+                                Text("结束扫描")
+                                    .font(.system(.body, design: .rounded, weight: .bold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 12)
+                            .background(.red.opacity(0.85), in: Capsule())
+                            .shadow(color: .red.opacity(0.4), radius: 10, x: 0, y: 4)
+                        }
+                        .buttonStyle(.plain)
+                        GlassButton(title: "导出",
+                                    systemImage: "square.and.arrow.up",
+                                    prominent: true,
+                                    disabled: viewModel.isExporting) {
+                            showExportSheet = true
+                        }
                     }
                 }
             }

@@ -2,53 +2,56 @@
 //  TextureMapper.swift
 //  Lidar Scan (二次开发)
 //
-//  把相机当前帧的颜色采样到网格顶点上（顶点取色）。
-//  原理：世界坐标顶点 → 投影到相机像素 → 读取 BGRA 颜色。
+//  把相机画面颜色采样到网格顶点上（顶点取色）。
+//  投影只用“值类型”的视图矩阵 + 内参（由 FrameSnapshot 在暂停前物化），
+//  因此可以安全地在后台线程执行，不会触碰 ARKit 对象的共享内存。
 //
 
-import ARKit
 import CoreVideo
 import CoreGraphics
-import UIKit
 import simd
 
 enum TextureMapper {
-    /// 当前界面方向（projectPoint 需要；图片坐标对齐屏幕）
-    private static func currentOrientation() -> UIInterfaceOrientation {
-        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-            return scene.interfaceOrientation
-        }
-        return .portrait
-    }
-
-    /// 为每个顶点采样相机颜色；失败或不可见顶点保持 nil（由调用方决定兜底）
+    /// 为每个顶点采样相机颜色；无有效快照时返回 nil（调用方持有灰色兜底）
     static func sampleColors(vertices: [SIMD3<Float>],
                              snapshot: FrameSnapshot?) -> [SIMD3<Float>]? {
-        guard let camera = snapshot?.camera,
-              let image = snapshot?.image else { return nil }
+        guard let snapshot = snapshot,
+              let image = snapshot.image else { return nil }
 
         let width = CVPixelBufferGetWidth(image)
         let height = CVPixelBufferGetHeight(image)
         guard width > 0, height > 0 else { return nil }
 
-        let viewport = CGSize(width: width, height: height)
+        let intrinsics = snapshot.intrinsics
+        let viewMatrix = snapshot.viewMatrix
+
         CVPixelBufferLockBaseAddress(image, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
 
         guard let base = CVPixelBufferGetBaseAddress(image) else { return nil }
         let bytesPerRow = CVPixelBufferGetBytesPerRow(image)
 
-        let orientation = currentOrientation()
+        // 读取内参（simd_float3x3 按 [列][行] 索引）
+        let fx = intrinsics[0][0]
+        let fy = intrinsics[1][1]
+        let cx = intrinsics[2][0]
+        let cy = intrinsics[2][1]
+
         var result = [SIMD3<Float>](repeating: .meshGray, count: vertices.count)
         var hitCount = 0
 
         for i in 0..<vertices.count {
-            let projected = camera.projectPoint(vertices[i],
-                                                orientation: orientation,
-                                                viewportSize: viewport)
-            // 仅在画面内的顶点取色
-            let x = Int(projected.x)
-            let y = Int(projected.y)
+            // 世界坐标 → 相机坐标（viewMatrix 已包含界面方向转换）
+            let cameraPoint = viewMatrix * SIMD4<Float>(vertices[i].x, vertices[i].y, vertices[i].z, 1)
+
+            // 只在相机前方（z > 0）的顶点取色
+            let z = cameraPoint.z
+            guard z > 0 else { continue }
+
+            let projectedX = fx * cameraPoint.x / z + cx
+            let projectedY = fy * cameraPoint.y / z + cy
+            let x = Int(projectedX)
+            let y = Int(projectedY)
             guard x >= 0, x < width, y >= 0, y < height else { continue }
 
             let pixel = base.advanced(by: y * bytesPerRow + x * 4)
