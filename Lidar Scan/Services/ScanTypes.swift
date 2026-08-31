@@ -106,7 +106,8 @@ struct FrameSnapshot {
     let depthHeight: Int
 
     static func make(from frame: ARFrame?, orientation: UIInterfaceOrientation) -> FrameSnapshot? {
-        guard let frame = frame, let img = frame.capturedImage else { return nil }
+        guard let frame = frame else { return nil }
+        let img = frame.capturedImage   // capturedImage 为非可选类型
         let imageData = CameraPixelCopier.copyBGRA(from: img)
 
         var depthData: [Float]? = nil
