@@ -52,7 +52,7 @@ enum MeshWriter {
         let hasColor = (data.colors != nil)
         if hasColor {
             for v in data.coloredVertices {
-                text += String(format: "v %.5f %.5f %.5f %.3f %.3f %.3f\n",
+                text += String(format: "v %.3f %.3f %.3f %.2f %.2f %.2f\n",
                                v.vertex.x, v.vertex.y, v.vertex.z,
                                min(max(v.color.x, 0), 1),
                                min(max(v.color.y, 0), 1),
@@ -60,7 +60,7 @@ enum MeshWriter {
             }
         } else {
             for v in data.vertices {
-                text += String(format: "v %.5f %.5f %.5f\n", v.x, v.y, v.z)
+                text += String(format: "v %.3f %.3f %.3f\n", v.x, v.y, v.z)
             }
         }
 
@@ -76,7 +76,7 @@ enum MeshWriter {
                 }
             }
             for n in normals {
-                text += String(format: "vn %.5f %.5f %.5f\n", n.x, n.y, n.z)
+                text += String(format: "vn %.3f %.3f %.3f\n", n.x, n.y, n.z)
             }
             var faceLines = ""
             var idx = 0

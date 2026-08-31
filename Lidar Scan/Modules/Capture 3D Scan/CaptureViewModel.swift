@@ -372,6 +372,9 @@ extension CaptureViewModel: ARSessionDelegate {
     }
 
     nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // 丢弃低跟踪质量帧（苹果官方建议）：漂移帧混入会导致"对不上/墙变厚/尖刺"
+        guard frame.camera.trackingState == .normal else { return }
+
         let orientation = Self.readInterfaceOrientation()
 
         // 关键帧采样（节流）。只有采样帧才做深拷贝（image+depth+conf），

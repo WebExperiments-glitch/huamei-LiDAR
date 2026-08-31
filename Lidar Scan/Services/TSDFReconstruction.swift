@@ -44,13 +44,13 @@ enum TSDFReconstruction {
         guard let sceneBox = sceneBox else { throw ScanExportError.noMeshData }
 
         var extent = sceneBox.max - sceneBox.min
-        extent.x = max(extent.x, 0.8)
-        extent.y = max(extent.y, 0.8)
-        extent.z = max(extent.z, 0.8)
+        extent.x = max(extent.x, 0.9)
+        extent.y = max(extent.y, 0.9)
+        extent.z = max(extent.z, 0.9)
 
         let maxSpan = max(extent.x, max(extent.y, extent.z))
-        // 体素边长自适应（整体限制 0.8cm~2cm）
-        let voxel = min(max(maxSpan / Float(dimension), 0.008), 0.02)
+        // 体素边长自适应（1.5~3.5cm）：较粗体素更平滑、面数更少、文件更小
+        let voxel = min(max(maxSpan / Float(dimension), 0.015), 0.035)
 
         // 以场景中心为原点展开立方体，避免单侧贴边
         let center = sceneBox.min + extent / 2
@@ -64,8 +64,8 @@ enum TSDFReconstruction {
 
         var mesh = volume.extractSurface()
         guard !mesh.vertices.isEmpty, mesh.faceCount > 0 else { throw ScanExportError.noMeshData }
-        // ② 提取后 Laplacian 平滑（对标 Open3D filter_smooth_simple），消除网格锯齿
-        mesh = smoothMesh(mesh, iterations: 1, factor: 0.6)
+        // ② 提取后 Laplacian 平滑（对标 Open3D filter_smooth_simple），消除网格锯齿/尖刺
+        mesh = smoothMesh(mesh, iterations: 2, factor: 0.5)
         return mesh
     }
 
