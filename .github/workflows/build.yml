@@ -62,11 +62,24 @@ jobs:
           ditto -c -k --keepParent "Build/Products/Release-iphoneos/Lidar Scan.app" "../LidarScan-device-unsigned.zip"
           ditto -c -k --keepParent "Build/Products/Debug-iphonesimulator/Lidar Scan.app" "../LidarScan-simulator-app.zip"
 
+      - name: Package unsigned .ipa (Payload)
+        run: |
+          cd "build/Build/Products/Release-iphoneos"
+          mkdir -p Payload
+          cp -R "Lidar Scan.app" "Payload/"
+          zip -r "$GITHUB_WORKSPACE/LidarScan-unsigned.ipa" Payload
+
       - name: Upload device build
         uses: actions/upload-artifact@v4
         with:
           name: LidarScan-device-unsigned
           path: LidarScan-device-unsigned.zip
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: LidarScan-unsigned-ipa
+          path: LidarScan-unsigned.ipa
 
       - name: Upload simulator build
         uses: actions/upload-artifact@v4
