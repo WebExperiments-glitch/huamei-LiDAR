@@ -9,9 +9,18 @@
 import ARKit
 import CoreVideo
 import CoreGraphics
+import UIKit
 import simd
 
 enum TextureMapper {
+    /// 当前界面方向（projectPoint 需要；图片坐标对齐屏幕）
+    private static func currentOrientation() -> UIInterfaceOrientation {
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+            return scene.interfaceOrientation
+        }
+        return .portrait
+    }
+
     /// 为每个顶点采样相机颜色；失败或不可见顶点保持 nil（由调用方决定兜底）
     static func sampleColors(vertices: [SIMD3<Float>],
                              snapshot: FrameSnapshot?) -> [SIMD3<Float>]? {
@@ -29,12 +38,13 @@ enum TextureMapper {
         guard let base = CVPixelBufferGetBaseAddress(image) else { return nil }
         let bytesPerRow = CVPixelBufferGetBytesPerRow(image)
 
+        let orientation = currentOrientation()
         var result = [SIMD3<Float>](repeating: .meshGray, count: vertices.count)
         var hitCount = 0
 
         for i in 0..<vertices.count {
             let projected = camera.projectPoint(vertices[i],
-                                                orientation: .up,
+                                                orientation: orientation,
                                                 viewportSize: viewport)
             // 只在 z > 0（相机前方）且在画面内的顶点取色
             guard projected.z > 0 else { continue }

@@ -24,7 +24,7 @@ enum MeshExtractor {
 
             // ARKit 网格自带法线；缺失时补零，由导出层自行兜底
             let hasNormals = geometry.normals.count == vertexCount
-            let normalPtr: UnsafePointer<SIMD3<Float>>? = hasNormals
+            let normalPtr: UnsafeMutablePointer<SIMD3<Float>>? = hasNormals
                 ? geometry.normals.buffer.contents().advanced(by: geometry.normals.offset).assumingMemoryBound(to: SIMD3<Float>.self)
                 : nil
 

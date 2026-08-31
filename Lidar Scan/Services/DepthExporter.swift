@@ -13,6 +13,9 @@ import UniformTypeIdentifiers
 
 enum DepthExporter {
 
+    /// ARKit 深度置信度图的像素格式 'cnf8'（该常量未在 SDK 中公开为命名常量）
+    private static let confidencePixelFormat: CVPixelFormatType = 0x636E6638
+
     enum DepthError: LocalizedError {
         case invalidBuffer
         case unsupportedFormat
@@ -75,7 +78,7 @@ enum DepthExporter {
         guard width > 0, height > 0 else { throw DepthError.invalidBuffer }
 
         let format = CVPixelBufferGetPixelFormatType(buffer)
-        guard format == kCVPixelFormatType_Confidence8 else { throw DepthError.unsupportedFormat }
+        guard format == confidencePixelFormat else { throw DepthError.unsupportedFormat }
 
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }

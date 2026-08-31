@@ -88,7 +88,7 @@ struct StartView: View {
                             Image(systemName: "exclamationmark.triangle")
                                 .font(.system(size: 40))
                             Text("此设备不支持 LiDAR")
-                                .font(.system(.title3, weight: .bold, design: .rounded))
+                                .font(.system(size: 24, weight: .bold, design: .rounded))
                             Text("该功能需要搭载激光雷达扫描仪的 iPhone 12 Pro 及以上机型，或 2020 年后的 iPad Pro")
                                 .font(.system(.subheadline, design: .rounded))
                                 .multilineTextAlignment(.center)

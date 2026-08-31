@@ -244,7 +244,7 @@ struct GlassFormatMenu: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .background(.glass, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(Material.glass, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .glassEffect(.regular)
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)

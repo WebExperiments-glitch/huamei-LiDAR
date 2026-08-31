@@ -14,13 +14,13 @@ extension Data {
     /// 追加一个小端序整数
     mutating func appendLE<T: FixedWidthInteger>(_ value: T) {
         var v = value.littleEndian
-        withUnsafeBytes(of: &v) { append(contentsOf: $0) }
+        Swift.withUnsafeBytes(of: &v) { append(contentsOf: $0) }
     }
 
     /// 追加一个 Float（小端序，直接按位拷贝）
     mutating func appendFloat(_ value: Float) {
         var v = value
-        withUnsafeBytes(of: &v) { append(contentsOf: $0) }
+        Swift.withUnsafeBytes(of: &v) { append(contentsOf: $0) }
     }
 
     /// 追加多个 Float
