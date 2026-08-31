@@ -385,11 +385,7 @@ struct ScanViewerView: View {
         }
         .statusBarHidden(true)
         .onAppear {
-            do {
-                loadedScene = try SCNScene(url: item.url, options: nil)
-            } catch {
-                noteMessage = "加载失败：\(error.localizedDescription)"
-            }
+            loadedScene = loadScene(for: item)
         }
         .sheet(item: $shareContent) { content in
             ShareSheet(items: content.urls.map { $0 as Any })
@@ -400,6 +396,35 @@ struct ScanViewerView: View {
             Text(noteMessage ?? "")
         }
         .toolbar(.hidden, for: .navigationBar)
+    }
+
+    // MARK: 预览加载（按格式分流：OBJ/USDZ 系统加载，PLY 解析为点云渲染）
+
+    private func loadScene(for item: ScanFileItem) -> SCNScene? {
+        switch item.format {
+        case .ply:
+            guard let mesh = try? PLYParser.parse(url: item.url),
+                  !mesh.vertices.isEmpty else { return nil }
+            return Self.makePointCloudScene(from: mesh)
+        default:
+            return try? SCNScene(url: item.url, options: nil)
+        }
+    }
+
+    private static func makePointCloudScene(from mesh: ScanMeshData) -> SCNScene? {
+        let positions = mesh.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
+        guard !positions.isEmpty else { return nil }
+        let vertexSource = SCNGeometrySource(vertices: positions)
+        let indices = Array(0..<positions.count).map { Int32($0) }
+        let element = SCNGeometryElement(indices: indices, primitiveType: .point)
+        let geometry = SCNGeometry(sources: [vertexSource], elements: [element])
+        let material = SCNMaterial()
+        material.isDoubleSided = true
+        material.diffuse.contents = UIColor(white: 0.45, alpha: 1.0)
+        geometry.materials = [material]
+        let scene = SCNScene()
+        scene.rootNode.addChildNode(SCNNode(geometry: geometry))
+        return scene
     }
 
     // MARK: 多格式转换导出
@@ -417,13 +442,21 @@ struct ScanViewerView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                // 解析当前 OBJ → 重建网格数据 → 写出目标格式
-                let mesh = try OBJParser.parse(url: sourceURL)
+                // 按源格式解析：PLY→点云，其它→网格（OBJ）
+                let sourceKind: ScanContentKind
+                let mesh: ScanMeshData
+                if item.format == .ply {
+                    mesh = try PLYParser.parse(url: sourceURL)
+                    sourceKind = .pointCloud
+                } else {
+                    mesh = try OBJParser.parse(url: sourceURL)
+                    sourceKind = .mesh
+                }
                 let fileName = ScanFileExporter.uniqueBaseName(raw: baseName,
                                                                ext: format.fileExtension,
                                                                in: directory)
                 let targetURL = directory.appendingPathComponent(fileName + "." + format.fileExtension)
-                try MeshWriter.write(mesh, kind: .mesh, format: format, to: targetURL)
+                try MeshWriter.write(mesh, kind: sourceKind, format: format, to: targetURL)
 
                 Task { @MainActor in
                     isConverting = false
