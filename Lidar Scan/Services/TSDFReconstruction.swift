@@ -17,8 +17,8 @@ enum TSDFReconstruction {
 
     /// 体积分辨率（体素数/边），内存恒定 ≈192³
     private static let dimension = 192
-    /// TSDF 截断距离（体素个数），工业标定 ≈5-6
-    private static let truncationVoxels = 6
+    /// TSDF 截断带（体素个数）：沿视线单侧推进带宽（实际带宽见 TSDFVolume，此处 2）
+    private static let truncationVoxels = 2
     /// 权重封顶（防数值溢出/模型僵化，形成滑动记忆窗）
     private static let maxWeight: Float = 20
     /// 提取前最小权重阈值（低于此视为噪声体素，置空）
@@ -168,7 +168,9 @@ private struct TSDFVolume {
     // 融合/提取参数
     private static let samplingStep = 2
     private static let confidenceThreshold: UInt8 = 1
-    private static let truncationVoxels = 6
+    /// 截断带（体素个数）：沿视线单侧推进的带宽。2 体素 ≈ 6~10cm，
+    /// 远小于位姿漂移量级，避免“正负带叠染”造成全场过零碎面。
+    private static let truncationVoxels = 2
     private static let maxWeight: Float = 20
     private static let minConfidentWeight: Float = 1
 
@@ -246,14 +248,17 @@ private struct TSDFVolume {
                 let surfacePoint = (worldFromCamera * camPoint).xyz
                 guard surfacePoint.x.isFinite, surfacePoint.y.isFinite, surfacePoint.z.isFinite else { continue }
 
-                // 沿视线双侧（表面两侧截断区）更新 TSDF
+                // 沿视线单侧推进（KinectFusion 标准融合）：
+                // 只更新表面前方一小段截断带（自由空间 → 正 sdf）+ 紧邻表面背后的薄带（负 sdf），
+                // 更远处/被遮挡的体素一律不写——避免几十帧漂移的“正负带叠染”致全场碎面。
                 let dir = simd_normalize(surfacePoint - cameraWorld)
-                var s: Float = step
+                var s: Float = voxelSize
                 while s <= tau {
-                    updateVoxel(at: surfacePoint - dir * s, sdf: s / tau)
-                    updateVoxel(at: surfacePoint + dir * s, sdf: -s / tau)
+                    updateVoxel(at: surfacePoint - dir * s, sdf: s / tau)   // 自由/空区（正 sdf）
                     s += step
                 }
+                // 表面背后仅 1 个体素的薄负带，用于形成零交叉面
+                updateVoxel(at: surfacePoint + dir * voxelSize, sdf: -1)
             }
         }
     }
