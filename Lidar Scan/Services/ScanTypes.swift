@@ -40,7 +40,7 @@ enum ScanExportFormat: String, CaseIterable, Identifiable {
 
     /// 列表页/预览页是否可直接用 SceneKit 打开
     var previewSupported: Bool {
-        self == .obj || self == .usdz
+        self == .obj || self == .usdz || self == .ply
     }
 }
 
@@ -113,6 +113,35 @@ struct FrameSnapshot {
                              depthMap: frame.sceneDepth?.depthMap,
                              confidenceMap: frame.sceneDepth?.confidenceMap,
                              viewport: viewport)
+    }
+}
+
+// MARK: - 关键帧（深度图重建数据源）
+//
+// B 计划：不再读取 ARMeshAnchor 的 GPU 缓冲（M2 上 AGX 驱动重映射导致崩溃），
+// 改为只采集 CVPixelBuffer 深度图 + 相机位姿（纯值），在 CPU 上反投影成点云。
+
+struct KeyFrameSnapshot {
+    /// 该帧的「世界→相机」视图矩阵（值拷贝）
+    let viewMatrix: simd_float4x4
+    /// 相机内参（fx/fy/cx/cy）
+    let intrinsics: simd_float3x3
+    /// LiDAR 深度图（16-bit float，CVPixelBuffer 为线程安全数据通道）
+    let depthMap: CVPixelBuffer?
+    /// 深度置信度图（Y8：0=low，85=medium，170=high），用于融合时去噪
+    let confidenceMap: CVPixelBuffer?
+    /// 深度图尺寸
+    let viewport: CGSize
+
+    static func make(from frame: ARFrame?, orientation: UIInterfaceOrientation) -> KeyFrameSnapshot? {
+        guard let frame = frame,
+              let depth = frame.sceneDepth?.depthMap else { return nil }
+        return KeyFrameSnapshot(viewMatrix: frame.camera.viewMatrix(for: orientation),
+                                intrinsics: frame.camera.intrinsics,
+                                depthMap: depth,
+                                confidenceMap: frame.sceneDepth?.confidenceMap,
+                                viewport: CGSize(width: CVPixelBufferGetWidth(depth),
+                                                 height: CVPixelBufferGetHeight(depth)))
     }
 }
 

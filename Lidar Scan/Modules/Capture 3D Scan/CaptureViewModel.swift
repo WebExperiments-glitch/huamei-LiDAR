@@ -2,13 +2,10 @@
 //  CaptureViewModel.swift
 //  Lidar Scan (二次开发)
 //
-//  扫描会话管理：会话启停、网格显示，以及
-//  「结束扫描 → 主线程物化数据 → 后台导出」的安全流程。
-//
-//  ⚠️ 防闪退红线：任何 ARKit 对象（ARMeshAnchor / ARCamera / 深度缓冲）
-//  都只能在「会话尚未暂停、主线程」时读取；读取结果必须物化为纯 Swift 值
-//  （数组 / 矩阵 / 像素缓冲强引用）后，才能交给后台线程处理。
-//  否则暂停瞬间 ARKit 会释放底层共享内存，后台读取即 UAF 闪退。
+//  扫描会话管理（B 计划 / 深度图通道）：
+//  不再读取 ARMeshAnchor 的 GPU 缓冲（M2 上会导致 SIGSEGV），
+//  只采集 sceneDepth 深度图 + 相机位姿（CVPixelBuffer 线程安全通道），
+//  结束时在 CPU 上反投影成世界点云并落盘 PLY。
 //
 
 import SwiftUI
@@ -22,16 +19,11 @@ final class CaptureViewModel: NSObject, ObservableObject {
     // MARK: - 发布状态
 
     @Published var isSessionRunning = true
-    /// 是否已完成「结束扫描」并物化好数据（只允许在已结束时导出）
     @Published var isFinished = false
-    /// 结束后的计算/落盘阶段（显示「空中三角测量计算中…」遮罩）
     @Published var isProcessing = false
-    /// 落盘完成，页面应自动退出回主界面
     @Published var didFinishScan = false
-    @Published var showDebugMesh = true
     @Published var isExporting = false
     @Published var statusMessage: String?
-    /// 弹窗通知（导出成功 / 失败 / 提示）
     @Published var alertMessage: String?
 
     // MARK: - AR 视图
@@ -41,19 +33,14 @@ final class CaptureViewModel: NSObject, ObservableObject {
     private var currentConfiguration: ARWorldTrackingConfiguration?
     private var didStartSession = false
 
-    // MARK: - 已物化的扫描数据（纯 Swift 值，可安全跨线程）
-    //
-    // 这些数据只允许在 ARSessionDelegate 回调（安全窗口）内写入，
-    // 之后任何线程都不得再访问 ARKit 对象。
+    // MARK: - 采集缓存（纯值 + 线程安全缓冲）
 
-    /// 每个网格锚点在回调窗口内深拷贝的快照（identifier → 快照）
-    private var meshSnapshots: [UUID: MeshExtractor.MeshAnchorSnapshot] = [:]
-    /// 最近一帧的相机/图像快照（在回调窗口内物化）
-    private var latestSnapshot: FrameSnapshot?
-
-    /// 结束扫描时组装好的网格（纯 Swift 值）
+    /// 关键帧（深度图 + 位姿），用于重建点云
+    private var keyFrames: [KeyFrameSnapshot] = []
+    /// 最近一帧（含相机图像），用于点云上色与深度图导出
+    private var latestFrameSnapshot: FrameSnapshot?
+    /// 结束扫描时生成的点云（纯 Swift 值）
     private var cachedMeshData: ScanMeshData?
-    /// 结束扫描时的相机快照（纯值）
     private var cachedSnapshot: FrameSnapshot?
 
     // MARK: - 会话控制
@@ -62,18 +49,14 @@ final class CaptureViewModel: NSObject, ObservableObject {
         guard !didStartSession else { return }
         didStartSession = true
 
-        meshSnapshots.removeAll()
-        latestSnapshot = nil
+        keyFrames.removeAll()
+        latestFrameSnapshot = nil
+        cachedMeshData = nil
 
         let configuration = ARWorldTrackingConfiguration()
         configuration.environmentTexturing = .automatic
         configuration.planeDetection = [.horizontal, .vertical]
-        // 稳定性优先：使用纯 .mesh 场景重建。
-        // .meshWithClassification 会多挂一路语义分类更新器，与底层交互面更大，
-        // 在 iPadOS 27 上更易触发时序问题；纯网格对流更稳。
-        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
-            configuration.sceneReconstruction = .mesh
-        }
+        // B 计划：不启用 sceneReconstruction（mesh），彻底绕开 GPU 缓冲读取
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             configuration.frameSemantics = [.sceneDepth]
         }
@@ -82,11 +65,10 @@ final class CaptureViewModel: NSObject, ObservableObject {
         arView.session.delegate = self
         arView.session.run(configuration)
         currentConfiguration = configuration
-        applyDebugState()
-        statusMessage = "请缓慢移动设备，扫描周围环境"
+        statusMessage = "请缓慢移动设备，环绕扫描目标"
     }
 
-    /// 暂停 / 继续（扫描阶段）
+    /// 暂停 / 继续
     func toggleSession() {
         guard !isFinished else { return }
         if isSessionRunning {
@@ -100,65 +82,93 @@ final class CaptureViewModel: NSObject, ObservableObject {
             isSessionRunning = true
             statusMessage = "扫描已继续"
         }
-        applyDebugState()
     }
 
-    /// 网格显示开关
-    func toggleDebugMesh() {
-        showDebugMesh.toggle()
-        applyDebugState()
-    }
-
-    /// 结束扫描：主线程同步物化网格 + 相机快照，然后暂停会话。
-    /// 物化之后，后台线程绝不再触碰任何 ARKit 对象。
+    /// 结束扫描：在主线程收尾，后台反投影成点云并落盘，完成后自动退出
     @discardableResult
     func finishScan() -> Bool {
-        guard !isFinished else { return !meshSnapshots.isEmpty }
-        guard !meshSnapshots.isEmpty else {
-            alertMessage = "还没有捕捉到网格，请先扫描几秒再结束"
+        guard !isFinished else { return cachedMeshData != nil }
+        guard !keyFrames.isEmpty else {
+            alertMessage = "还没有采集到深度数据，请先扫描几秒再结束"
+            return false
+        }
+        guard let latest = latestFrameSnapshot else {
+            alertMessage = "相机尚未就绪，请稍后再试"
             return false
         }
 
-        // 全部数据都已由回调提前物化好，这里不触碰任何 ARKit 对象
-        let meshData = MeshExtractor.buildMesh(from: Array(meshSnapshots.values))
-        guard !meshData.isEmpty else {
-            alertMessage = "网格数据为空，请重新扫描"
-            return false
-        }
-        let snapshot = latestSnapshot
-        cachedMeshData = meshData
-        cachedSnapshot = snapshot
-
+        let frames = keyFrames
+        isFinished = true
         arView.session.pause()
         isSessionRunning = false
-        isFinished = true
         statusMessage = "正在空中三角测量计算…"
         isProcessing = true
 
-        // 后台：给顶点采样相机颜色 → 自动落盘一份 OBJ 供列表查看
+        // 后台：关键帧 → TSDF 融合 → 表面网格 → 上色 → 落盘 OBJ。
+        // 若重建失败（异常数据/空场），自动降级为深度反投影点云并落盘 PLY，绝不崩溃。
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var finalMesh = meshData
-            if let colors = TextureMapper.sampleColors(vertices: meshData.vertices, snapshot: snapshot) {
-                finalMesh.colors = colors
-            }
-            let options = ExportOptions(fileName: ScanFileExporter.defaultName(),
-                                        format: .obj,
-                                        contentKind: .mesh,
-                                        textured: false,
-                                        exportDepth: false)
+            var mesh: ScanMeshData
+            var kind: ScanContentKind = .mesh
             do {
-                _ = try ScanFileExporter.run(data: finalMesh, options: options, snapshot: snapshot)
+                // 主路径：TSDF 重建网格
+                mesh = try TSDFReconstruction.reconstruct(from: frames)
+                kind = .mesh
+            } catch {
+                // 降级路径：点云
+                let rawPoints = PointCloudGenerator.generate(from: frames)
+                guard !rawPoints.isEmpty else {
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.isProcessing = false
+                        self.isFinished = false
+                        self.statusMessage = "重建失败，请重试"
+                        self.alertMessage = "没有采集到有效深度数据，请重新扫描"
+                    }
+                    return
+                }
+                mesh = ScanMeshData()
+                mesh.vertices = rawPoints.map { $0.position }
+                mesh.colors = rawPoints.map { $0.color }
+                kind = .pointCloud
+            }
+
+            // 用最近一帧相机画面给模型上色
+            if let colors = TextureMapper.sampleColors(vertices: mesh.vertices, snapshot: latest) {
+                mesh.colors = colors
+            }
+            guard !mesh.isEmpty else {
                 Task { @MainActor in
                     guard let self else { return }
                     self.isProcessing = false
+                    self.isFinished = false
+                    self.statusMessage = "模型为空，请重新扫描"
+                    self.alertMessage = "扫描数据不足，请重新扫描"
+                }
+                return
+            }
+
+            let options = ExportOptions(fileName: ScanFileExporter.defaultName(),
+                                        format: .obj,
+                                        contentKind: kind,
+                                        textured: false,
+                                        exportDepth: false)
+            do {
+                let result = try ScanFileExporter.run(data: mesh, options: options, snapshot: latest)
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.cachedMeshData = mesh
+                    self.cachedSnapshot = latest
+                    self.isProcessing = false
+                    self.statusMessage = "模型已生成，可导出"
                     self.didFinishScan = true
+                    _ = result
                 }
             } catch {
                 Task { @MainActor in
                     guard let self else { return }
                     self.isProcessing = false
                     self.isFinished = false
-                    self.statusMessage = "模型保存失败，请重试"
+                    self.statusMessage = "保存失败，请重试"
                     self.alertMessage = error.localizedDescription
                 }
             }
@@ -166,11 +176,11 @@ final class CaptureViewModel: NSObject, ObservableObject {
         return true
     }
 
-    /// 重新扫描：恢复会话并清掉缓存
+    /// 重新扫描
     func resumeScan() {
         guard isFinished else { return }
-        meshSnapshots.removeAll()
-        latestSnapshot = nil
+        keyFrames.removeAll()
+        latestFrameSnapshot = nil
         cachedMeshData = nil
         cachedSnapshot = nil
         if let configuration = currentConfiguration {
@@ -179,10 +189,9 @@ final class CaptureViewModel: NSObject, ObservableObject {
         isSessionRunning = true
         isFinished = false
         statusMessage = "扫描已继续"
-        applyDebugState()
     }
 
-    /// 页面退出时关闭会话，节省功耗
+    /// 页面退出时关闭会话
     func pauseForBackground() {
         if isSessionRunning {
             arView.session.pause()
@@ -190,30 +199,19 @@ final class CaptureViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func applyDebugState() {
-        if showDebugMesh {
-            arView.debugOptions.insert(.showSceneUnderstanding)
-        } else {
-            arView.debugOptions.remove(.showSceneUnderstanding)
-        }
-    }
-
-    // MARK: - 导出（后台只处理已物化的值类型数据）
+    // MARK: - 导出（用结束扫描时生成的点云）
 
     func export(_ options: ExportOptions) {
         guard !isExporting else { return }
-
-        // 未结束扫描？先结束（物化 + 暂停），保证数据快照一致性
         guard finishScan() else { return }
-
         guard let meshData = cachedMeshData else {
-            alertMessage = "模型数据为空，请重新扫描后再导出"
+            alertMessage = "点云数据为空，请重新扫描后再导出"
             return
         }
         let snapshot = cachedSnapshot
 
         isExporting = true
-        statusMessage = "正在生成模型…"
+        statusMessage = "正在导出…"
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
@@ -223,7 +221,7 @@ final class CaptureViewModel: NSObject, ObservableObject {
                 Task { @MainActor in
                     guard let self else { return }
                     let names = result.urls.map(\.lastPathComponent).joined(separator: "、")
-                    self.statusMessage = "模型已导出"
+                    self.statusMessage = "导出完成"
                     self.alertMessage = "已保存：\n\(names)"
                     self.isExporting = false
                 }
@@ -237,74 +235,58 @@ final class CaptureViewModel: NSObject, ObservableObject {
             }
         }
     }
+}
 
-    // MARK: - 工具
+// MARK: - ARSessionDelegate（只读取线程安全的 CVPixelBuffer 通道）
 
-    /// 读取当前界面方向（线程无关，可从 ARSessionDelegate 回调调用）
+extension CaptureViewModel: ARSessionDelegate {
+
+    /// 关键帧采样间隔
+    private static let keyFrameInterval: TimeInterval = 0.25
+    /// 关键帧数量上限：采用**循环缓冲**（超出替换最旧帧），
+    /// 长时扫描内存恒定（≈240×100KB≈24MB），时长无限也不会增长。
+    private static let keyFrameLimit = 240
+
+    private enum DepthSampler {
+        static let lock = NSLock()
+        static var lastSampleAt: TimeInterval = 0
+    }
+
+    nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        let orientation = Self.readInterfaceOrientation()
+
+        // 最近一帧快照（值物化，用于上色与深度导出）
+        if let snapshot = FrameSnapshot.make(from: frame, orientation: orientation) {
+            Task { @MainActor [weak self] in
+                self?.latestFrameSnapshot = snapshot
+            }
+        }
+
+        // 关键帧采样（节流）
+        let now = ProcessInfo.processInfo.systemUptime
+        let shouldSample = DepthSampler.lock.withLock { () -> Bool in
+            guard now - DepthSampler.lastSampleAt >= Self.keyFrameInterval else { return false }
+            DepthSampler.lastSampleAt = now
+            return true
+        }
+        guard shouldSample,
+              let keyFrame = KeyFrameSnapshot.make(from: frame, orientation: orientation) else { return }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if self.keyFrames.count >= Self.keyFrameLimit {
+                self.keyFrames.removeFirst()   // 循环缓冲：替换最旧帧
+            }
+            self.keyFrames.append(keyFrame)
+        }
+    }
+
+    /// 读取当前界面方向（线程无关）
     private static nonisolated func readInterfaceOrientation() -> UIInterfaceOrientation {
         if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
             return scene.interfaceOrientation
         }
         return .portrait
-    }
-}
-
-// MARK: - ARSessionDelegate（数据采集安全窗口）
-//
-// 只有这里可以读取 ARKit 对象，且必须在回调内完成深拷贝。
-// 产物（纯 Swift 值）通过 MainActor 任务写入存储，供结束扫描/导出使用。
-
-extension CaptureViewModel: ARSessionDelegate {
-
-    /// 网格拷贝节流间隔（秒）：同一锚点距上次深拷贝不足该值则跳过，
-    /// 显著降低与 ARKit 底层缓冲纠缠的频率，也更省 CPU。
-    private static let ingestThrottle: TimeInterval = 0.3
-
-    /// 节流表（非隔离枚举 + 锁保护，可从 ARKit 回调线程访问）
-    private enum IngestThrottle {
-        static let lock = NSLock()
-        static var lastTime: [UUID: TimeInterval] = [:]
-    }
-
-    nonisolated func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-        ingestMeshAnchors(anchors)
-    }
-
-    nonisolated func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        ingestMeshAnchors(anchors)
-    }
-
-    nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        // 在回调窗口内把相机矩阵/图像物化为值（之后回主线程只传值）
-        let orientation = Self.readInterfaceOrientation()
-        guard let snapshot = FrameSnapshot.make(from: frame, orientation: orientation) else { return }
-        Task { @MainActor [weak self] in
-            self?.latestSnapshot = snapshot
-        }
-    }
-
-    private nonisolated func ingestMeshAnchors(_ anchors: [ARAnchor]) {
-        let now = ProcessInfo.processInfo.systemUptime
-        for anchor in anchors {
-            guard let mesh = anchor as? ARMeshAnchor else { continue }
-            let identifier = mesh.identifier
-
-            // 节流：高频 didUpdate 时避免对同一锚点反复全量深拷贝
-            let shouldCopy = IngestThrottle.lock.withLock { () -> Bool in
-                let last = IngestThrottle.lastTime[identifier] ?? -Double.greatestFiniteMagnitude
-                guard now - last >= Self.ingestThrottle else { return false }
-                IngestThrottle.lastTime[identifier] = now
-                return true
-            }
-            guard shouldCopy else { continue }
-
-            // 回调窗口内深拷贝网格缓冲（官方安全时机）
-            let snapshot = MeshExtractor.snapshot(of: mesh)
-            guard !snapshot.vertices.isEmpty else { continue }
-            Task { @MainActor [weak self] in
-                self?.meshSnapshots[identifier] = snapshot
-            }
-        }
     }
 }
 
@@ -319,6 +301,6 @@ struct ARContainerView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: ARView, context: Context) {
-        // 会话生命周期全部由 CaptureViewModel 管理，这里无需处理
+        // 会话生命周期全部由 CaptureViewModel 管理
     }
 }

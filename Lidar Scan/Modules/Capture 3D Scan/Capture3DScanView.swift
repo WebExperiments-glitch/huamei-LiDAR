@@ -58,13 +58,10 @@ struct Capture3DScanView: View {
                         }
                     }
                 } else {
-                    // 扫描中：暂停/继续、网格开关、结束扫描、导出
+                    // 扫描中：暂停/继续、结束扫描、导出
                     HStack(spacing: 14) {
                         GlassIconButton(systemImage: viewModel.isSessionRunning ? "pause.fill" : "play.fill") {
                             viewModel.toggleSession()
-                        }
-                        GlassIconButton(systemImage: viewModel.showDebugMesh ? "square.grid.3d.fill" : "eye.fill") {
-                            viewModel.toggleDebugMesh()
                         }
                         Button {
                             _ = viewModel.finishScan()
@@ -105,7 +102,7 @@ struct Capture3DScanView: View {
                                     .tint(.white)
                                 Text("正在空中三角测量计算…")
                                     .font(.system(.body, design: .rounded, weight: .semibold))
-                                Text("正在生成模型，请稍候")
+                                Text("正在从深度图生成点云，请稍候")
                                     .font(.system(.caption, design: .rounded))
                                     .foregroundStyle(.white.opacity(0.6))
                             }
@@ -161,10 +158,12 @@ struct ExportOptionsSheetView: View {
     @ObservedObject var viewModel: CaptureViewModel
 
     @State private var fileName = ""
-    @State private var format: ScanExportFormat = .obj
-    @State private var contentKind: ScanContentKind = .mesh
+    @State private var format: ScanExportFormat = .ply
     @State private var textured = true
     @State private var exportDepth = true
+
+    /// 当前产品输出为网格（LiDAR 深度 → TSDF 融合 → 表面提取）
+    private let contentKind: ScanContentKind = .mesh
 
     private var canExport: Bool {
         if contentKind == .pointCloud, !format.supportsPointCloud { return false }
@@ -203,14 +202,20 @@ struct ExportOptionsSheetView: View {
                         }
                     }
 
-                    // 内容类型
+                    // 内容（当前为点云模式）
                     GlassCard {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("内容")
                                 .font(.system(.headline, design: .rounded, weight: .semibold))
-                            GlassSegmentedPicker(title: "内容", selection: $contentKind)
+                            HStack(spacing: 8) {
+                                Image(systemName: "point.3.connected.trianglepath.dotted")
+                                    .foregroundStyle(.white.opacity(0.6))
+                                Text("网格（LiDAR 深度 TSDF 融合）")
+                                    .font(.system(.subheadline, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.7))
+                            }
                             if pointCloudHint {
-                                Text("\(format.rawValue) 不支持点云，请选择 OBJ 或 PLY")
+                                Text("\(format.rawValue) 不支持点云，请选择 OBJ、PLY 或 GLB")
                                     .font(.system(.caption, design: .rounded))
                                     .foregroundStyle(.orange)
                             }
