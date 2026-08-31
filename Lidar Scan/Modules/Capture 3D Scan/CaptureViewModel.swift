@@ -147,6 +147,22 @@ final class CaptureViewModel: NSObject, ObservableObject {
                 return
             }
 
+            // 居中到原点：预览相机默认看向原点，保证模型必然可见；尺寸不变
+            if !mesh.vertices.isEmpty {
+                var lo = mesh.vertices[0]
+                var hi = mesh.vertices[0]
+                for v in mesh.vertices {
+                    lo = simd_min(lo, v)
+                    hi = simd_max(hi, v)
+                }
+                let center = (lo + hi) / 2
+                if simd_length(center) > 0.001 {
+                    for i in 0..<mesh.vertices.count {
+                        mesh.vertices[i] -= center
+                    }
+                }
+            }
+
             let options = ExportOptions(fileName: ScanFileExporter.defaultName(),
                                         format: .obj,
                                         contentKind: kind,
@@ -159,7 +175,7 @@ final class CaptureViewModel: NSObject, ObservableObject {
                     self.cachedMeshData = mesh
                     self.cachedSnapshot = latest
                     self.isProcessing = false
-                    self.statusMessage = "模型已生成，可导出"
+                    self.statusMessage = "模型已生成：\(mesh.vertexCount) 顶点 / \(mesh.faceCount) 面"
                     self.didFinishScan = true
                     _ = result
                 }

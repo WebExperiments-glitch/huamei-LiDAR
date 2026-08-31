@@ -24,8 +24,9 @@ enum TSDFReconstruction {
     private static let maxWeight: Float = 20
     /// 提取前最小权重阈值（低于此视为噪声体素，置空）
     private static let minConfidentWeight: Float = 1
-    /// 置信度阈值：仅融合 medium(85) 及以上的深度像素
-    private static let confidenceThreshold: UInt8 = 85
+    /// 置信度阈值：>0 即融合（ARKit 置信度 buffer 值域不统一（0-3 或 0/85/170/255），
+    /// 阈值取 1 确保低值时也不会把整个场过滤空；宁可留少量噪点，不能全空）
+    private static let confidenceThreshold: UInt8 = 1
     /// 深度采样步长（帧内每隔 n 像素）
     private static let samplingStep = 2
     /// 帧数上限
@@ -121,10 +122,10 @@ private struct TSDFVolume {
 
     // 融合/提取参数（与 TSDFReconstruction 保持一致）
     private static let samplingStep = 2
-    private static let confidenceThreshold: UInt8 = 85
+    private static let confidenceThreshold: UInt8 = 1
     private static let truncationVoxels = 6
     private static let maxWeight: Float = 20
-    private static let minConfidentWeight: Float = 2
+    private static let minConfidentWeight: Float = 1
 
     private var tsdf: [Float]
     private var weight: [Float]

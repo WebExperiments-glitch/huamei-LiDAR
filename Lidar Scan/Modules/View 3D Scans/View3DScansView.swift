@@ -385,7 +385,11 @@ struct ScanViewerView: View {
         }
         .statusBarHidden(true)
         .onAppear {
-            loadedScene = try? SCNScene(url: item.url)
+            do {
+                loadedScene = try SCNScene(url: item.url, options: nil)
+            } catch {
+                noteMessage = "加载失败：\(error.localizedDescription)"
+            }
         }
         .sheet(item: $shareContent) { content in
             ShareSheet(items: content.urls.map { $0 as Any })
