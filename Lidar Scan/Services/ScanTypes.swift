@@ -143,7 +143,8 @@ struct FrameSnapshot {
 struct KeyFrameSnapshot {
     /// 该帧的「世界→相机」视图矩阵（值拷贝）
     let viewMatrix: simd_float4x4
-    /// 相机内参（fx/fy/cx/cy）
+    /// 相机内参（**已缩放到深度图分辨率**；深度图 256×192 与图像 1920×1440 不同源，
+    /// 官方点云示例必须按 depthRes/imageRes 缩放 fx/fy/cx/cy 后才能用于深度反投影）
     let intrinsics: simd_float3x3
     /// 深拷贝的 LiDAR 深度（米，行紧凑）
     let depthValues: [Float]
@@ -161,12 +162,29 @@ struct KeyFrameSnapshot {
         if let confMap = frame.sceneDepth?.confidenceMap {
             conf = CameraPixelCopier.copyConfidence(from: confMap)
         }
+
+        // ★ 关键修复：ARKit 的 intrinsics 针对 capturedImage 分辨率（如 1920×1440），
+        // 而 depthMap 是 256×192——必须按比例缩放后才是深度图的内参。
+        // 直接使用图像内参会让反投影坐标放大 ~7.5 倍 → 模型畸变、与真实完全对不上。
+        let imageRes = frame.camera.imageResolution
+        let depthW = CVPixelBufferGetWidth(depth)
+        let depthH = CVPixelBufferGetHeight(depth)
+        var intrinsics = frame.camera.intrinsics
+        if imageRes.width > 0, imageRes.height > 0, depthW > 0, depthH > 0 {
+            let sx = Float(depthW) / Float(imageRes.width)
+            let sy = Float(depthH) / Float(imageRes.height)
+            intrinsics[0][0] *= sx   // fx
+            intrinsics[1][1] *= sy   // fy
+            intrinsics[2][0] *= sx   // cx
+            intrinsics[2][1] *= sy   // cy
+        }
+
         return KeyFrameSnapshot(viewMatrix: frame.camera.viewMatrix(for: orientation),
-                                intrinsics: frame.camera.intrinsics,
+                                intrinsics: intrinsics,
                                 depthValues: depthValues,
                                 confidences: conf,
-                                width: CVPixelBufferGetWidth(depth),
-                                height: CVPixelBufferGetHeight(depth))
+                                width: depthW,
+                                height: depthH)
     }
 }
 
