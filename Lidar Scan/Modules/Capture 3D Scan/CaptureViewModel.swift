@@ -260,9 +260,11 @@ extension CaptureViewModel: ARSessionDelegate {
     /// 显著降低与 ARKit 底层缓冲纠缠的频率，也更省 CPU。
     private static let ingestThrottle: TimeInterval = 0.3
 
-    /// 节流表（线程安全）
-    private nonisolated static let ingestLock = NSLock()
-    private nonisolated static var lastIngestTime: [UUID: TimeInterval] = [:]
+    /// 节流表（非隔离枚举 + 锁保护，可从 ARKit 回调线程访问）
+    private enum IngestThrottle {
+        static let lock = NSLock()
+        static var lastTime: [UUID: TimeInterval] = [:]
+    }
 
     nonisolated func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         ingestMeshAnchors(anchors)
@@ -288,10 +290,10 @@ extension CaptureViewModel: ARSessionDelegate {
             let identifier = mesh.identifier
 
             // 节流：高频 didUpdate 时避免对同一锚点反复全量深拷贝
-            let shouldCopy = Self.ingestLock.withLock { () -> Bool in
-                let last = Self.lastIngestTime[identifier] ?? -Double.greatestFiniteMagnitude
+            let shouldCopy = IngestThrottle.lock.withLock { () -> Bool in
+                let last = IngestThrottle.lastTime[identifier] ?? -Double.greatestFiniteMagnitude
                 guard now - last >= Self.ingestThrottle else { return false }
-                Self.lastIngestTime[identifier] = now
+                IngestThrottle.lastTime[identifier] = now
                 return true
             }
             guard shouldCopy else { continue }
