@@ -1,0 +1,75 @@
+name: iOS Build (GitHub Actions)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build .app on macOS runner
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26 (required for iOS 26 liquid glass)
+        run: |
+          set -e
+          SELECTED=""
+          # 优先 Xcode 26（含 iOS 26 SDK，编译 .glass / glassEffect 必需）
+          for ver in 26.5 26.4 26.3 26.2 26.1 26.0; do
+            if [ -d "/Applications/Xcode_${ver}.app" ]; then SELECTED="${ver}"; break; fi
+          done
+          if [ -z "$SELECTED" ]; then
+            echo "::error::Runner 上没有找到 Xcode 26（部署目标 iOS 26 需要 iOS 26 SDK）"
+            echo "可用 Xcode："
+            ls /Applications | grep -i xcode || true
+            exit 1
+          fi
+          sudo xcode-select -s "/Applications/Xcode_${SELECTED}.app/Contents/Developer"
+          echo "Using Xcode ${SELECTED}"
+          xcodebuild -version
+
+      - name: Build (device, unsigned)
+        run: |
+          xcodebuild \
+            -project "huamei-LiDAR.xcodeproj" \
+            -scheme "Lidar Scan" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Build (simulator, unsigned)
+        run: |
+          xcodebuild \
+            -project "huamei-LiDAR.xcodeproj" \
+            -scheme "Lidar Scan" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Package unsigned .app
+        run: |
+          cd build
+          ditto -c -k --keepParent "Build/Products/Release-iphoneos/Lidar Scan.app" "../LidarScan-device-unsigned.zip"
+          ditto -c -k --keepParent "Build/Products/Debug-iphonesimulator/Lidar Scan.app" "../LidarScan-simulator-app.zip"
+
+      - name: Upload device build
+        uses: actions/upload-artifact@v4
+        with:
+          name: LidarScan-device-unsigned
+          path: LidarScan-device-unsigned.zip
+
+      - name: Upload simulator build
+        uses: actions/upload-artifact@v4
+        with:
+          name: LidarScan-simulator-app
+          path: LidarScan-simulator-app.zip
