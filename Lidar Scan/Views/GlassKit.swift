@@ -87,18 +87,21 @@ struct GlassButton: View {
 struct GlassIconButton: View {
     let systemImage: String
     var prominent: Bool = false
+    /// 高亮态（强调开关已打开）
+    var highlighted: Bool = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(prominent ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+                .foregroundStyle(prominent || highlighted ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
                 .frame(width: 44, height: 44)
                 .background(
                     prominent
                         ? AnyShapeStyle(.white.opacity(0.22))
-                        : AnyShapeStyle(.ultraThinMaterial),
+                        : (highlighted ? AnyShapeStyle(.green.opacity(0.45))
+                                        : AnyShapeStyle(.ultraThinMaterial)),
                     in: Circle()
                 )
                 .glassEffect(.regular)

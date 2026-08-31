@@ -25,6 +25,10 @@ final class CaptureViewModel: NSObject, ObservableObject {
     @Published var isExporting = false
     @Published var statusMessage: String?
     @Published var alertMessage: String?
+    /// 实时三角网格预览（系统 sceneReconstruction 渲染）
+    @Published var showSceneMesh = false
+    /// 深度热力图（近红→中黄→远绿），基于深拷贝深度生成，用于距离校验
+    @Published var depthHeatmapImage: UIImage?
 
     // MARK: - AR 视图
 
@@ -56,7 +60,15 @@ final class CaptureViewModel: NSObject, ObservableObject {
         let configuration = ARWorldTrackingConfiguration()
         configuration.environmentTexturing = .automatic
         configuration.planeDetection = [.horizontal, .vertical]
-        // B 计划：不启用 sceneReconstruction（mesh），彻底绕开 GPU 缓冲读取
+        // 实时三角网格预览：ARKit/RealityKit 内部渲染 sceneReconstruction 网格
+        // （叠加在相机画面上，用于“建模 vs 相机”位置校准）。
+        // 仅“显示”，从不读取网格缓冲——渲染由系统完成，零崩溃风险。
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
+            configuration.sceneReconstruction = .meshWithClassification
+            arView.debugOptions.insert(.showSceneUnderstanding)
+            showSceneMesh = true
+        }
+        // 数据管线仍只依赖 sceneDepth（深拷贝通道），与网格预览互不影响
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             configuration.frameSemantics = [.sceneDepth]
         }
@@ -215,6 +227,84 @@ final class CaptureViewModel: NSObject, ObservableObject {
         }
     }
 
+    /// 切换三角网格预览开/关（只切渲染选项，不碰缓冲）
+    func toggleSceneMesh() {
+        showSceneMesh.toggle()
+        if showSceneMesh {
+            arView.debugOptions.insert(.showSceneUnderstanding)
+        } else {
+            arView.debugOptions.remove(.showSceneUnderstanding)
+        }
+    }
+
+    /// 由深拷贝深度生成红黄绿热力图（近红→中黄→远绿）
+    static func makeDepthHeatmap(depth: [Float],
+                                 width: Int,
+                                 height: Int) -> UIImage? {
+        guard width > 0, height > 0, depth.count >= width * height else { return nil }
+
+        // 输出宽度固定 72（等比缩小），避免生成大图
+        let outW = 72
+        let outH = max(1, height * outW / width)
+        let yStride = max(1, height / outH)
+        let xStride = max(1, width / outW)
+
+        var rgba = [UInt8](repeating: 0, count: outW * outH * 4)
+
+        func heatColor(_ d: Float) -> (UInt8, UInt8, UInt8) {
+            // 0.4m 红 → 1.2m 黄 → 3.0m+ 绿；无效/超远灰
+            guard d.isFinite, d > 0.2, d < 6.0 else { return (90, 90, 90) }
+            let t = min(max((d - 0.4) / 2.6, 0), 1)   // 0=红 1=绿
+            let r: UInt8, g: UInt8, b: UInt8
+            if t < 0.5 {
+                let f = t * 2                       // 红→黄
+                r = 255
+                g = UInt8(255 * f)
+                b = 0
+            } else {
+                let f = (t - 0.5) * 2               // 黄→绿
+                r = UInt8(255 * (1 - f))
+                g = 255
+                b = 0
+            }
+            return (r, g, b)
+        }
+
+        var oy = 0
+        var y = 0
+        while y < height, oy < outH {
+            var ox = 0
+            var x = 0
+            while x < width, ox < outW {
+                let d = depth[y * width + x]
+                let (r, g, b) = heatColor(d)
+                let i = (oy * outW + ox) * 4
+                rgba[i] = r
+                rgba[i + 1] = g
+                rgba[i + 2] = b
+                rgba[i + 3] = 255
+                x += xStride
+                ox += 1
+            }
+            y += yStride
+            oy += 1
+        }
+
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        guard let cg = CGImage(width: outW,
+                               height: outH,
+                               bitsPerComponent: 8,
+                               bitsPerPixel: 32,
+                               bytesPerRow: outW * 4,
+                               space: CGColorSpaceCreateDeviceRGB(),
+                               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                               provider: provider,
+                               decode: nil,
+                               shouldInterpolate: false,
+                               intent: .defaultIntent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+
     // MARK: - 导出（用结束扫描时生成的点云）
 
     func export(_ options: ExportOptions) {
@@ -285,9 +375,15 @@ extension CaptureViewModel: ARSessionDelegate {
         guard let snapshot = FrameSnapshot.make(from: frame, orientation: orientation),
               let keyFrame = KeyFrameSnapshot.make(from: frame, orientation: orientation) else { return }
 
+        // 从深拷贝深度生成热力图（近红·中黄·远绿），用于距离校验
+        let heatmap = Self.makeDepthHeatmap(depth: keyFrame.depthValues,
+                                            width: keyFrame.width,
+                                            height: keyFrame.height)
+
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.latestFrameSnapshot = snapshot
+            self.depthHeatmapImage = heatmap
             if self.keyFrames.count >= Self.keyFrameLimit {
                 self.keyFrames.removeFirst()   // 循环缓冲：替换最旧帧
             }

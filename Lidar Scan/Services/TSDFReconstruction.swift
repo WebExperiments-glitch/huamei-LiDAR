@@ -216,6 +216,37 @@ private struct TSDFVolume {
         weight[i] = w
     }
 
+    // MARK: 深度预处理（来自 Open3D/移动端重建管线共识）
+
+    /// 3×3 中值滤波：剔除 LiDAR 脉冲噪声点（对孤立异常深度像素直接替换为邻域中值）。
+    /// 仅在每帧融合前对深度数组做一次，消除表面“麻点/拉丝/撕裂”。
+    private static func medianFilterDepth(_ src: [Float],
+                                          _ width: Int,
+                                          _ height: Int) -> [Float] {
+        var out = src
+        guard width > 2, height > 2 else { return out }
+        for y in 1..<(height - 1) {
+            var row = y * width
+            for x in 1..<(width - 1) {
+                var values = [Float]()
+                values.reserveCapacity(9)
+                for dy in -1...1 {
+                    let ny = (y + dy) * width
+                    for dx in -1...1 {
+                        let d = src[ny + x + dx]
+                        if d > 0.2 { values.append(d) }
+                    }
+                }
+                if !values.isEmpty {
+                    values.sort()
+                    out[row + x] = values[values.count / 2]
+                }
+            }
+            row += width
+        }
+        return out
+    }
+
     // MARK: 表面提取（标准 Marching Cubes）
 
     mutating func extractSurface() -> ScanMeshData {

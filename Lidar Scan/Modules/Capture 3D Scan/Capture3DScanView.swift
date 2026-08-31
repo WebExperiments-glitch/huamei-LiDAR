@@ -58,8 +58,12 @@ struct Capture3DScanView: View {
                         }
                     }
                 } else {
-                    // 扫描中：暂停/继续、结束扫描、导出
+                    // 扫描中：网格预览、暂停/继续、结束扫描、导出
                     HStack(spacing: 14) {
+                        GlassIconButton(systemImage: "scope",
+                                        highlighted: viewModel.showSceneMesh) {
+                            viewModel.toggleSceneMesh()
+                        }
                         GlassIconButton(systemImage: viewModel.isSessionRunning ? "pause.fill" : "play.fill") {
                             viewModel.toggleSession()
                         }
@@ -90,6 +94,30 @@ struct Capture3DScanView: View {
             }
             .padding(.bottom, 24)
             .frame(maxHeight: .infinity, alignment: .bottom)
+
+            // 深度热力图小窗（近红·中黄·远绿，右下角）
+            if let heatmap = viewModel.depthHeatmapImage, !viewModel.isFinished {
+                VStack(spacing: 4) {
+                    Image(uiImage: heatmap)
+                        .resizable()
+                        .frame(width: 128, height: 96)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(.white.opacity(0.4), lineWidth: 1)
+                        )
+                    Text("近·中·远")
+                        .font(.system(.caption2, design: .rounded, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+                .padding(8)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .glassEffect(.regular)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, 16)
+                .padding(.bottom, 118)
+                .allowsHitTesting(false)
+            }
 
             // 结束扫描后的计算遮罩（空三 / 生成模型）
             if viewModel.isProcessing {
