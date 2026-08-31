@@ -65,16 +65,18 @@ struct ScanFileExporter {
 
         var urls: [URL] = [fileURL]
 
-        // 4) 附带导出深度图 / 置信度
+        // 4) 附带导出深度图 / 置信度（值数据版本）
         if options.exportDepth {
-            if let depth = snapshot?.depthMap {
+            if let depth = snapshot?.depthData,
+               let dw = snapshot?.depthWidth, let dh = snapshot?.depthHeight, dw > 0, dh > 0 {
                 let depthURL = folder.appendingPathComponent(baseName + "_depth.png")
-                try? DepthExporter.writeDepthMap(depth, to: depthURL)
+                try? DepthExporter.writeDepthMap(depth: depth, width: dw, height: dh, to: depthURL)
                 urls.append(depthURL)
             }
-            if let confidence = snapshot?.confidenceMap {
+            if let confidence = snapshot?.confidenceData,
+               let dw = snapshot?.depthWidth, let dh = snapshot?.depthHeight, dw > 0, dh > 0 {
                 let confURL = folder.appendingPathComponent(baseName + "_confidence.png")
-                try? DepthExporter.writeConfidenceMap(confidence, to: confURL)
+                try? DepthExporter.writeConfidenceMap(confidence: confidence, width: dw, height: dh, to: confURL)
                 urls.append(confURL)
             }
         }

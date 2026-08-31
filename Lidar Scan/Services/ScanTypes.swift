@@ -93,55 +93,165 @@ struct FrameSnapshot {
     let viewMatrix: simd_float4x4
     /// 相机内参（fx/fy/cx/cy）
     let intrinsics: simd_float3x3
-    /// 相机图像像素缓冲（强引用，可安全在后台读取）
-    let image: CVPixelBuffer?
-    /// LiDAR 深度图（可空）
-    let depthMap: CVPixelBuffer?
-    /// 深度置信度图（可空）
-    let confidenceMap: CVPixelBuffer?
+    /// 深拷贝的相机图像像素（BGRA8，按行紧凑）——回调线程内物化，后台读取安全
+    let imageData: [UInt8]?
     /// 图像像素尺寸
-    let viewport: CGSize
+    let imageWidth: Int
+    let imageHeight: Int
+    /// 深拷贝的 LiDAR 深度（米）与置信度（0-255）
+    let depthData: [Float]?
+    let confidenceData: [UInt8]?
+    /// 深度图尺寸
+    let depthWidth: Int
+    let depthHeight: Int
 
     static func make(from frame: ARFrame?, orientation: UIInterfaceOrientation) -> FrameSnapshot? {
-        guard let frame = frame else { return nil }
-        let img = frame.capturedImage
-        let viewport = CGSize(width: CVPixelBufferGetWidth(img),
-                              height: CVPixelBufferGetHeight(img))
+        guard let frame = frame, let img = frame.capturedImage else { return nil }
+        let imageData = CameraPixelCopier.copyBGRA(from: img)
+
+        var depthData: [Float]? = nil
+        var confData: [UInt8]? = nil
+        var dw = 0, dh = 0
+        if let depth = frame.sceneDepth {
+            depthData = CameraPixelCopier.copyDepth(from: depth.depthMap)
+            if let conf = depth.confidenceMap {
+                confData = CameraPixelCopier.copyConfidence(from: conf)
+            }
+            dw = CVPixelBufferGetWidth(depth.depthMap)
+            dh = CVPixelBufferGetHeight(depth.depthMap)
+        }
+
         return FrameSnapshot(viewMatrix: frame.camera.viewMatrix(for: orientation),
                              intrinsics: frame.camera.intrinsics,
-                             image: img,
-                             depthMap: frame.sceneDepth?.depthMap,
-                             confidenceMap: frame.sceneDepth?.confidenceMap,
-                             viewport: viewport)
+                             imageData: imageData,
+                             imageWidth: CVPixelBufferGetWidth(img),
+                             imageHeight: CVPixelBufferGetHeight(img),
+                             depthData: depthData,
+                             confidenceData: confData,
+                             depthWidth: dw,
+                             depthHeight: dh)
     }
 }
 
 // MARK: - 关键帧（深度图重建数据源）
 //
-// B 计划：不再读取 ARMeshAnchor 的 GPU 缓冲（M2 上 AGX 驱动重映射导致崩溃），
-// 改为只采集 CVPixelBuffer 深度图 + 相机位姿（纯值），在 CPU 上反投影成点云。
+// B 计划：不读取 ARKit 任何 GPU/池化缓冲——
+// 深度与置信度在回调线程内**深拷贝**为纯 Swift 数组后再交给后台重建，
+// 杜绝“引用存活但底层内存已被 ARKit 复写/解映射”的 Use-After-Free。
 
 struct KeyFrameSnapshot {
     /// 该帧的「世界→相机」视图矩阵（值拷贝）
     let viewMatrix: simd_float4x4
     /// 相机内参（fx/fy/cx/cy）
     let intrinsics: simd_float3x3
-    /// LiDAR 深度图（16-bit float，CVPixelBuffer 为线程安全数据通道）
-    let depthMap: CVPixelBuffer?
-    /// 深度置信度图（Y8：0=low，85=medium，170=high），用于融合时去噪
-    let confidenceMap: CVPixelBuffer?
+    /// 深拷贝的 LiDAR 深度（米，行紧凑）
+    let depthValues: [Float]
+    /// 深拷贝的置信度（0-255，可选）
+    let confidences: [UInt8]?
     /// 深度图尺寸
-    let viewport: CGSize
+    let width: Int
+    let height: Int
 
     static func make(from frame: ARFrame?, orientation: UIInterfaceOrientation) -> KeyFrameSnapshot? {
         guard let frame = frame,
-              let depth = frame.sceneDepth?.depthMap else { return nil }
+              let depth = frame.sceneDepth?.depthMap,
+              let depthValues = CameraPixelCopier.copyDepth(from: depth) else { return nil }
+        var conf: [UInt8]? = nil
+        if let confMap = frame.sceneDepth?.confidenceMap {
+            conf = CameraPixelCopier.copyConfidence(from: confMap)
+        }
         return KeyFrameSnapshot(viewMatrix: frame.camera.viewMatrix(for: orientation),
                                 intrinsics: frame.camera.intrinsics,
-                                depthMap: depth,
-                                confidenceMap: frame.sceneDepth?.confidenceMap,
-                                viewport: CGSize(width: CVPixelBufferGetWidth(depth),
-                                                 height: CVPixelBufferGetHeight(depth)))
+                                depthValues: depthValues,
+                                confidences: conf,
+                                width: CVPixelBufferGetWidth(depth),
+                                height: CVPixelBufferGetHeight(depth))
+    }
+}
+
+// MARK: - 像素深拷贝（回调线程安全物化）
+
+enum CameraPixelCopier {
+    /// 拷贝相机图像为紧凑 BGRA8。返回 nil 表示不可用。
+    static func copyBGRA(from buffer: CVPixelBuffer) -> [UInt8]? {
+        guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA else { return nil }
+        let width = CVPixelBufferGetWidth(buffer)
+        let height = CVPixelBufferGetHeight(buffer)
+        guard width > 0, height > 0 else { return nil }
+
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+
+        var out = [UInt8](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            let src = base.advanced(by: y * bytesPerRow)
+            out.withUnsafeMutableBytes { dst in
+                memcpy(dst.baseAddress!.advanced(by: y * width * 4), src, width * 4)
+            }
+        }
+        return out
+    }
+
+    /// 拷贝 LiDAR 深度图为 [Float]（米）
+    static func copyDepth(from buffer: CVPixelBuffer) -> [Float]? {
+        let width = CVPixelBufferGetWidth(buffer)
+        let height = CVPixelBufferGetHeight(buffer)
+        guard width > 0, height > 0 else { return nil }
+        let format = CVPixelBufferGetPixelFormatType(buffer)
+        guard format == kCVPixelFormatType_DepthFloat16
+                || format == kCVPixelFormatType_DepthFloat32 else { return nil }
+
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+
+        var out = [Float](repeating: 0, count: width * height)
+        if format == kCVPixelFormatType_DepthFloat16 {
+            var oi = 0
+            for y in 0..<height {
+                let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: UInt16.self)
+                for x in 0..<width {
+                    out[oi] = Float(Float16(bitPattern: row[x]))
+                    oi += 1
+                }
+            }
+        } else {
+            var oi = 0
+            for y in 0..<height {
+                let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float.self)
+                for x in 0..<width {
+                    out[oi] = row[x]
+                    oi += 1
+                }
+            }
+        }
+        return out
+    }
+
+    /// 拷贝置信度图为 [UInt8]
+    static func copyConfidence(from buffer: CVPixelBuffer) -> [UInt8]? {
+        let width = CVPixelBufferGetWidth(buffer)
+        let height = CVPixelBufferGetHeight(buffer)
+        guard width > 0, height > 0 else { return nil }
+
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+
+        var out = [UInt8](repeating: 0, count: width * height)
+        var oi = 0
+        for y in 0..<height {
+            let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: UInt8.self)
+            for x in 0..<width {
+                out[oi] = row[x]
+                oi += 1
+            }
+        }
+        return out
     }
 }
 

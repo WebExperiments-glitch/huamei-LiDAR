@@ -255,25 +255,23 @@ extension CaptureViewModel: ARSessionDelegate {
     nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
         let orientation = Self.readInterfaceOrientation()
 
-        // 最近一帧快照（值物化，用于上色与深度导出）
-        if let snapshot = FrameSnapshot.make(from: frame, orientation: orientation) {
-            Task { @MainActor [weak self] in
-                self?.latestFrameSnapshot = snapshot
-            }
-        }
-
-        // 关键帧采样（节流）
+        // 关键帧采样（节流）。只有采样帧才做深拷贝（image+depth+conf），
+        // 其余帧直接跳过，既不空转也不留 CVPixelBuffer 引用给后台。
         let now = ProcessInfo.processInfo.systemUptime
         let shouldSample = DepthSampler.lock.withLock { () -> Bool in
             guard now - DepthSampler.lastSampleAt >= Self.keyFrameInterval else { return false }
             DepthSampler.lastSampleAt = now
             return true
         }
-        guard shouldSample,
+        guard shouldSample else { return }
+
+        // 深拷贝发生在 ARKit 回调线程（缓冲仍活的窗口内），物化成纯 Swift 值
+        guard let snapshot = FrameSnapshot.make(from: frame, orientation: orientation),
               let keyFrame = KeyFrameSnapshot.make(from: frame, orientation: orientation) else { return }
 
         Task { @MainActor [weak self] in
             guard let self else { return }
+            self.latestFrameSnapshot = snapshot
             if self.keyFrames.count >= Self.keyFrameLimit {
                 self.keyFrames.removeFirst()   // 循环缓冲：替换最旧帧
             }

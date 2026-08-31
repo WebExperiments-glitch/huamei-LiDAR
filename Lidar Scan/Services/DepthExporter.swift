@@ -25,73 +25,32 @@ enum DepthExporter {
         }
     }
 
-    /// 导出深度图为 16-bit 灰度 PNG（毫米）
-    static func writeDepthMap(_ buffer: CVPixelBuffer, to url: URL) throws {
-        let width = CVPixelBufferGetWidth(buffer)
-        let height = CVPixelBufferGetHeight(buffer)
-        guard width > 0, height > 0 else { throw DepthError.invalidBuffer }
-
-        let format = CVPixelBufferGetPixelFormatType(buffer)
-
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw DepthError.invalidBuffer }
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
-
-        var output = [UInt16](repeating: 0, count: width * height)
-
-        switch format {
-        case kCVPixelFormatType_DepthFloat16:
-            let ptr = base.assumingMemoryBound(to: UInt16.self)
-            for y in 0..<height {
-                for x in 0..<width {
-                    let raw = ptr[y * (bytesPerRow / 2) + x]
-                    let depth = Float(Float16(bitPattern: raw))
-                    output[y * width + x] = millimeters(from: depth)
-                }
-            }
-
-        case kCVPixelFormatType_DepthFloat32:
-            let ptr = base.assumingMemoryBound(to: Float.self)
-            for y in 0..<height {
-                for x in 0..<width {
-                    let depth = ptr[y * (bytesPerRow / 4) + x]
-                    output[y * width + x] = millimeters(from: depth)
-                }
-            }
-
-        default:
-            throw DepthError.unsupportedFormat
+    /// 导出深度图为 16-bit 灰度 PNG（毫米）——值数据版本，纯 Swift 内存，后台安全
+    static func writeDepthMap(depth: [Float], width: Int, height: Int, to url: URL) throws {
+        guard width > 0, height > 0, depth.count >= width * height else {
+            throw DepthError.invalidBuffer
         }
-
+        var output = [UInt16](repeating: 0, count: width * height)
+        for i in 0..<(width * height) {
+            output[i] = millimeters(from: depth[i])
+        }
         let cgImage = try makeGray16Image(output, width: width, height: height)
         try writePNG(cgImage, to: url)
     }
 
-    /// 导出置信度图为 8-bit 灰度 PNG
-    static func writeConfidenceMap(_ buffer: CVPixelBuffer, to url: URL) throws {
-        let width = CVPixelBufferGetWidth(buffer)
-        let height = CVPixelBufferGetHeight(buffer)
-        guard width > 0, height > 0 else { throw DepthError.invalidBuffer }
-
-        // ARKit 置信度图为 8-bit（值为 0-3），按单字节读取即可
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw DepthError.invalidBuffer }
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
-        let ptr = base.assumingMemoryBound(to: UInt8.self)
-
-        // ARKit 置信度：0-3，放大到 0-255 便于查看
-        var output = [UInt8](repeating: 0, count: width * height)
-        for y in 0..<height {
-            for x in 0..<width {
-                let v = ptr[y * bytesPerRow + x]
-                output[y * width + x] = UInt8(min(255, Int(v) * 85))
-            }
+    /// 导出置信度图为 8-bit 灰度 PNG——值数据版本
+    static func writeConfidenceMap(confidence: [UInt8], width: Int, height: Int, to url: URL) throws {
+        guard width > 0, height > 0, confidence.count >= width * height else {
+            throw DepthError.invalidBuffer
         }
-
-        let cgImage = makeGray8Image(output, width: width, height: height)
-        guard let cgImage = cgImage else { throw DepthError.invalidBuffer }
+        var output = [UInt8](repeating: 0, count: width * height)
+        // ARKit 置信度：0-3，放大到 0-255 便于查看
+        for i in 0..<(width * height) {
+            output[i] = UInt8(min(255, Int(confidence[i]) * 85))
+        }
+        guard let cgImage = makeGray8Image(output, width: width, height: height) else {
+            throw DepthError.invalidBuffer
+        }
         try writePNG(cgImage, to: url)
     }
 

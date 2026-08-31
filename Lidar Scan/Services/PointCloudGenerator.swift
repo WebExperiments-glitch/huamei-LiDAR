@@ -34,11 +34,12 @@ enum PointCloudGenerator {
         all.reserveCapacity(min(frames.count * maxPointsPerFrame, maxTotal))
 
         for frame in frames {
-            guard let depth = frame.depthMap else { continue }
-            let points = project(depthMap: depth,
+            guard !frame.depthValues.isEmpty else { continue }
+            let points = project(depthValues: frame.depthValues,
                                  intrinsics: frame.intrinsics,
                                  viewMatrix: frame.viewMatrix,
-                                 viewport: frame.viewport)
+                                 width: frame.width,
+                                 height: frame.height)
             all.append(contentsOf: points)
             if all.count >= maxTotal { break }
         }
@@ -47,22 +48,12 @@ enum PointCloudGenerator {
 
     // MARK: - 单帧反投影
 
-    private static func project(depthMap: CVPixelBuffer,
+    private static func project(depthValues: [Float],
                                 intrinsics: simd_float3x3,
                                 viewMatrix: simd_float4x4,
-                                viewport: CGSize) -> [ColoredPoint] {
-        let width = Int(viewport.width)
-        let height = Int(viewport.height)
-        guard width > 0, height > 0 else { return [] }
-
-        let format = CVPixelBufferGetPixelFormatType(depthMap)
-        guard format == kCVPixelFormatType_DepthFloat16
-                || format == kCVPixelFormatType_DepthFloat32 else { return [] }
-
-        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return [] }
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
+                                width: Int,
+                                height: Int) -> [ColoredPoint] {
+        guard width > 0, height > 0, depthValues.count >= width * height else { return [] }
 
         let fx = intrinsics[0][0]
         let fy = intrinsics[1][1]
@@ -77,15 +68,7 @@ enum PointCloudGenerator {
 
         for y in stride(from: 0, to: height, by: samplingStep) {
             for x in stride(from: 0, to: width, by: samplingStep) {
-                let depth: Float
-                if format == kCVPixelFormatType_DepthFloat16 {
-                    let row = base.advanced(by: y * bytesPerRow)
-                    let half = row.assumingMemoryBound(to: UInt16.self)
-                    depth = Float(Float16(bitPattern: half[x]))
-                } else {
-                    let row = base.advanced(by: y * bytesPerRow)
-                    depth = row.assumingMemoryBound(to: Float.self)[x]
-                }
+                let depth = depthValues[y * width + x]
 
                 // 只保留合理距离内的有效深度
                 guard depth.isFinite, depth > 0.2, depth < 6.0 else { continue }

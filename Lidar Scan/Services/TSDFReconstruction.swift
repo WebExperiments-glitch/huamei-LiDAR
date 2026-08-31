@@ -118,32 +118,11 @@ private struct TSDFVolume {
     // MARK: 融合单帧
 
     mutating func integrate(_ frame: KeyFrameSnapshot) {
-        guard let depth = frame.depthMap else { return }
-        let width = Int(frame.viewport.width)
-        let height = Int(frame.viewport.height)
-        guard width > 0, height > 0 else { return }
-
-        let format = CVPixelBufferGetPixelFormatType(depth)
-        guard format == kCVPixelFormatType_DepthFloat16
-                || format == kCVPixelFormatType_DepthFloat32 else { return }
-
-        CVPixelBufferLockBaseAddress(depth, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(depth, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(depth) else { return }
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(depth)
-        let bytesPerRowConf = CVPixelBufferGetBytesPerRow(depth)
-
-        // 置信度图（Y8）可选；缺失时不做置信度过滤
-        var confidenceBase: UnsafeMutableRawPointer? = nil
-        if let conf = frame.confidenceMap {
-            CVPixelBufferLockBaseAddress(conf, .readOnly)
-            confidenceBase = CVPixelBufferGetBaseAddress(conf)
-        }
-        defer {
-            if let conf = frame.confidenceMap {
-                CVPixelBufferUnlockBaseAddress(conf, .readOnly)
-            }
-        }
+        let width = frame.width
+        let height = frame.height
+        let depthValues = frame.depthValues
+        guard width > 0, height > 0, depthValues.count >= width * height else { return }
+        let confidences = frame.confidences   // 可选；行紧凑与深度一致
 
         let intrinsics = frame.intrinsics
         let fx = intrinsics[0][0]
@@ -159,22 +138,14 @@ private struct TSDFVolume {
 
         for y in stride(from: 0, to: height, by: Self.samplingStep) {
             for x in stride(from: 0, to: width, by: Self.samplingStep) {
-                // 置信度过滤：低于 medium 的深度像素不可靠，跳过
-                if let confBase = confidenceBase {
-                    let confValue = confBase.advanced(by: y * bytesPerRowConf).assumingMemoryBound(to: UInt8.self)[x]
-                    guard confValue >= Self.confidenceThreshold else { continue }
+                let p = y * width + x
+
+                // 置信度过滤：低于 medium(85) 的深度像素不可靠，跳过
+                if let confidences = confidences {
+                    guard confidences[p] >= Self.confidenceThreshold else { continue }
                 }
 
-                // 深度
-                let depthValue: Float
-                if format == kCVPixelFormatType_DepthFloat16 {
-                    let half = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: UInt16.self)
-                    depthValue = Float(Float16(bitPattern: half[x]))
-                } else {
-                    let floats = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float.self)
-                    depthValue = floats[x]
-                }
-
+                let depthValue = depthValues[p]
                 guard depthValue.isFinite, depthValue > 0.2, depthValue < 5.5 else { continue }
 
                 // 像素 → 相机坐标 → 世界坐标

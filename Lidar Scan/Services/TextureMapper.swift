@@ -16,20 +16,14 @@ enum TextureMapper {
     static func sampleColors(vertices: [SIMD3<Float>],
                              snapshot: FrameSnapshot?) -> [SIMD3<Float>]? {
         guard let snapshot = snapshot,
-              let image = snapshot.image else { return nil }
+              let imageData = snapshot.imageData else { return nil }
 
-        let width = CVPixelBufferGetWidth(image)
-        let height = CVPixelBufferGetHeight(image)
+        let width = snapshot.imageWidth
+        let height = snapshot.imageHeight
         guard width > 0, height > 0 else { return nil }
 
         let intrinsics = snapshot.intrinsics
         let viewMatrix = snapshot.viewMatrix
-
-        CVPixelBufferLockBaseAddress(image, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
-
-        guard let base = CVPixelBufferGetBaseAddress(image) else { return nil }
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(image)
 
         // 读取内参（simd_float3x3 按 [列][行] 索引）
         let fx = intrinsics[0][0]
@@ -54,13 +48,12 @@ enum TextureMapper {
             let y = Int(projectedY)
             guard x >= 0, x < width, y >= 0, y < height else { continue }
 
-            let pixel = base.advanced(by: y * bytesPerRow + x * 4)
-            let bytes = pixel.assumingMemoryBound(to: UInt8.self)
+            let pixel = (y * width + x) * 4
 
-            // capturedImage 为 BGRA 布局
-            let b = Float(bytes[0]) / 255.0
-            let g = Float(bytes[1]) / 255.0
-            let r = Float(bytes[2]) / 255.0
+            // capturedImage 为 BGRA 布局（深拷贝数组）
+            let b = Float(imageData[pixel]) / 255.0
+            let g = Float(imageData[pixel + 1]) / 255.0
+            let r = Float(imageData[pixel + 2]) / 255.0
             result[i] = SIMD3(r, g, b)
             hitCount += 1
         }
