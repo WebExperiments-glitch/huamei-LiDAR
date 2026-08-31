@@ -42,8 +42,18 @@ final class CaptureViewModel: NSObject, ObservableObject {
     private var didStartSession = false
 
     // MARK: - 已物化的扫描数据（纯 Swift 值，可安全跨线程）
+    //
+    // 这些数据只允许在 ARSessionDelegate 回调（安全窗口）内写入，
+    // 之后任何线程都不得再访问 ARKit 对象。
 
+    /// 每个网格锚点在回调窗口内深拷贝的快照（identifier → 快照）
+    private var meshSnapshots: [UUID: MeshExtractor.MeshAnchorSnapshot] = [:]
+    /// 最近一帧的相机/图像快照（在回调窗口内物化）
+    private var latestSnapshot: FrameSnapshot?
+
+    /// 结束扫描时组装好的网格（纯 Swift 值）
     private var cachedMeshData: ScanMeshData?
+    /// 结束扫描时的相机快照（纯值）
     private var cachedSnapshot: FrameSnapshot?
 
     // MARK: - 会话控制
@@ -51,6 +61,9 @@ final class CaptureViewModel: NSObject, ObservableObject {
     func startSessionIfNeeded() {
         guard !didStartSession else { return }
         didStartSession = true
+
+        meshSnapshots.removeAll()
+        latestSnapshot = nil
 
         let configuration = ARWorldTrackingConfiguration()
         configuration.environmentTexturing = .automatic
@@ -63,6 +76,7 @@ final class CaptureViewModel: NSObject, ObservableObject {
         }
 
         arView.automaticallyConfigureSession = false
+        arView.session.delegate = self
         arView.session.run(configuration)
         currentConfiguration = configuration
         applyDebugState()
@@ -96,34 +110,25 @@ final class CaptureViewModel: NSObject, ObservableObject {
     /// 物化之后，后台线程绝不再触碰任何 ARKit 对象。
     @discardableResult
     func finishScan() -> Bool {
-        guard !isFinished else { return cachedMeshData != nil }
-        guard let frame = arView.session.currentFrame else {
-            alertMessage = "相机尚未就绪，请稍后再试"
-            return false
-        }
-
-        let anchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
-        guard !anchors.isEmpty else {
+        guard !isFinished else { return !meshSnapshots.isEmpty }
+        guard !meshSnapshots.isEmpty else {
             alertMessage = "还没有捕捉到网格，请先扫描几秒再结束"
             return false
         }
 
-        // 前置：把相机矩阵按当前界面方向物化为值（再暂停就安全了）
-        let orientation = currentInterfaceOrientation()
-        let snapshot = FrameSnapshot.make(from: frame, orientation: orientation)
-
-        // 核心：同步抽取网格为纯 Swift 数组（此刻会话仍在运行，内存有效）
-        let meshData = MeshExtractor.extract(from: anchors)
+        // 全部数据都已由回调提前物化好，这里不触碰任何 ARKit 对象
+        let meshData = MeshExtractor.buildMesh(from: Array(meshSnapshots.values))
         guard !meshData.isEmpty else {
             alertMessage = "网格数据为空，请重新扫描"
             return false
         }
+        let snapshot = latestSnapshot
+        cachedMeshData = meshData
+        cachedSnapshot = snapshot
 
         arView.session.pause()
         isSessionRunning = false
         isFinished = true
-        cachedMeshData = meshData
-        cachedSnapshot = snapshot
         statusMessage = "正在空中三角测量计算…"
         isProcessing = true
 
@@ -161,13 +166,15 @@ final class CaptureViewModel: NSObject, ObservableObject {
     /// 重新扫描：恢复会话并清掉缓存
     func resumeScan() {
         guard isFinished else { return }
+        meshSnapshots.removeAll()
+        latestSnapshot = nil
+        cachedMeshData = nil
+        cachedSnapshot = nil
         if let configuration = currentConfiguration {
             arView.session.run(configuration)
         }
         isSessionRunning = true
         isFinished = false
-        cachedMeshData = nil
-        cachedSnapshot = nil
         statusMessage = "扫描已继续"
         applyDebugState()
     }
@@ -230,11 +237,49 @@ final class CaptureViewModel: NSObject, ObservableObject {
 
     // MARK: - 工具
 
-    private func currentInterfaceOrientation() -> UIInterfaceOrientation {
+    /// 读取当前界面方向（线程无关，可从 ARSessionDelegate 回调调用）
+    private static nonisolated func readInterfaceOrientation() -> UIInterfaceOrientation {
         if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
             return scene.interfaceOrientation
         }
         return .portrait
+    }
+}
+
+// MARK: - ARSessionDelegate（数据采集安全窗口）
+//
+// 只有这里可以读取 ARKit 对象，且必须在回调内完成深拷贝。
+// 产物（纯 Swift 值）通过 MainActor 任务写入存储，供结束扫描/导出使用。
+
+extension CaptureViewModel: ARSessionDelegate {
+
+    nonisolated func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        ingestMeshAnchors(anchors)
+    }
+
+    nonisolated func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        ingestMeshAnchors(anchors)
+    }
+
+    nonisolated func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // 在回调窗口内把相机矩阵/图像物化为值（之后回主线程只传值）
+        let orientation = Self.readInterfaceOrientation()
+        guard let snapshot = FrameSnapshot.make(from: frame, orientation: orientation) else { return }
+        Task { @MainActor [weak self] in
+            self?.latestSnapshot = snapshot
+        }
+    }
+
+    private nonisolated func ingestMeshAnchors(_ anchors: [ARAnchor]) {
+        for anchor in anchors {
+            guard let mesh = anchor as? ARMeshAnchor else { continue }
+            let identifier = mesh.identifier
+            // 回调窗口内深拷贝网格缓冲
+            let snapshot = MeshExtractor.snapshot(of: mesh)
+            Task { @MainActor [weak self] in
+                self?.meshSnapshots[identifier] = snapshot
+            }
+        }
     }
 }
 
