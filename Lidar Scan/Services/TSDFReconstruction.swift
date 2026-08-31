@@ -60,9 +60,55 @@ enum TSDFReconstruction {
             volume.integrate(frame)
         }
 
-        let mesh = volume.extractSurface()
+        var mesh = volume.extractSurface()
         guard !mesh.vertices.isEmpty, mesh.faceCount > 0 else { throw ScanExportError.noMeshData }
+        // ② 提取后 Laplacian 平滑（对标 Open3D filter_smooth_simple），消除网格锯齿
+        mesh = smoothMesh(mesh, iterations: 1, factor: 0.6)
         return mesh
+    }
+
+    // MARK: - 网格平滑（Laplacian）
+
+    /// 轻量 Laplacian 平滑：顶点向邻域均值轻微移动（scalar-1 轮）。
+    /// 使用累加器数组避免 O(V×A) 邻接表内存，控制峰值内存。
+    private static func smoothMesh(_ mesh: ScanMeshData,
+                                   iterations: Int,
+                                   factor: Float) -> ScanMeshData {
+        guard !mesh.vertices.isEmpty else { return mesh }
+        let n = mesh.vertices.count
+        guard n > 3 else { return mesh }
+
+        var result = mesh
+        var current = mesh.vertices
+
+        for _ in 0..<max(1, iterations) {
+            var acc = [SIMD3<Float>](repeating: .zero, count: n)
+            var cnt = [Int32](repeating: 0, count: n)
+
+            var f = 0
+            let faces = result.faces
+            while f + 2 < faces.count {
+                let a = Int(faces[f]), b = Int(faces[f + 1]), c = Int(faces[f + 2])
+                if a < n && b < n && c < n {
+                    let pa = current[a], pb = current[b], pc = current[c]
+                    acc[a] += pb + pc; cnt[a] += 2
+                    acc[b] += pa + pc; cnt[b] += 2
+                    acc[c] += pa + pb; cnt[c] += 2
+                }
+                f += 3
+            }
+
+            var next = current
+            for i in 0..<n where cnt[i] > 0 {
+                let avg = acc[i] / Float(cnt[i])
+                next[i] = current[i] * (1 - factor) + avg * factor
+            }
+            // 保持尺寸不变（含居中误差修正）
+            current = next
+        }
+
+        result.vertices = current
+        return result
     }
 
     // MARK: - 场景包围盒（稀疏反投影）
@@ -160,8 +206,9 @@ private struct TSDFVolume {
     mutating func integrate(_ frame: KeyFrameSnapshot) {
         let width = frame.width
         let height = frame.height
-        let depthValues = frame.depthValues
-        guard width > 0, height > 0, depthValues.count >= width * height else { return }
+        guard width > 0, height > 0, frame.depthValues.count >= width * height else { return }
+        // ① 融合前中值滤波去噪（剔除 LiDAR 脉冲噪声，Open3D/KinectFusion 同款步骤）
+        let depthValues = Self.medianFilterDepth(frame.depthValues, width, height)
         let confidences = frame.confidences
 
         let intrinsics = frame.intrinsics

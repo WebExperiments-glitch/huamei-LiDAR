@@ -77,7 +77,7 @@ final class CaptureViewModel: NSObject, ObservableObject {
         arView.session.delegate = self
         arView.session.run(configuration)
         currentConfiguration = configuration
-        statusMessage = "请缓慢移动设备，环绕扫描目标"
+        statusMessage = "请缓慢移动设备，环绕目标扫描（建议 40 秒内完成）"
     }
 
     /// 暂停 / 继续
@@ -349,9 +349,9 @@ extension CaptureViewModel: ARSessionDelegate {
 
     /// 关键帧采样间隔
     private static let keyFrameInterval: TimeInterval = 0.25
-    /// 关键帧数量上限：采用**循环缓冲**（超出替换最旧帧），
-    /// 长时扫描内存恒定（≈240×100KB≈24MB），时长无限也不会增长。
-    private static let keyFrameLimit = 240
+    /// 关键帧数量上限：循环缓冲。150 帧 ≈ 38 秒窗口——
+    /// 控制 VIO 位姿漂移累积（过长扫描会“墙变厚/拉丝”，对齐开源重建经验）。
+    private static let keyFrameLimit = 150
 
     private enum DepthSampler {
         static let lock = NSLock()
