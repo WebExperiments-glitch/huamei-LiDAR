@@ -46,8 +46,7 @@ enum TextureMapper {
             let projected = camera.projectPoint(vertices[i],
                                                 orientation: orientation,
                                                 viewportSize: viewport)
-            // 只在 z > 0（相机前方）且在画面内的顶点取色
-            guard projected.z > 0 else { continue }
+            // 仅在画面内的顶点取色
             let x = Int(projected.x)
             let y = Int(projected.y)
             guard x >= 0, x < width, y >= 0, y < height else { continue }

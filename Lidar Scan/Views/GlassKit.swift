@@ -20,7 +20,7 @@ struct GlassCard<Content: View>: View {
         content
             .padding(20)
             .background(
-                Material.glass,
+                .ultraThinMaterial,
                 in: RoundedRectangle(cornerRadius: 24, style: .continuous)
             )
             .glassEffect(.regular)
@@ -62,7 +62,7 @@ struct GlassButton: View {
             .background(
                 prominent
                     ? AnyShapeStyle(.white.opacity(0.22))
-                    : AnyShapeStyle(Material.glass),
+                    : AnyShapeStyle(.ultraThinMaterial),
                 in: Capsule()
             )
             .glassEffect(.regular)
@@ -98,7 +98,7 @@ struct GlassIconButton: View {
                 .background(
                     prominent
                         ? AnyShapeStyle(.white.opacity(0.22))
-                        : AnyShapeStyle(Material.glass),
+                        : AnyShapeStyle(.ultraThinMaterial),
                     in: Circle()
                 )
                 .glassEffect(.regular)
@@ -145,7 +145,7 @@ struct GlassSegmentedPicker<T: CaseIterable & Hashable & RawRepresentable>: View
             }
         }
         .padding(4)
-        .background(Material.glass, in: Capsule())
+        .background(.ultraThinMaterial, in: Capsule())
         .glassEffect(.regular)
         .overlay(
             Capsule().strokeBorder(
@@ -175,7 +175,7 @@ struct StatusChip: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Material.glass, in: Capsule())
+        .background(.ultraThinMaterial, in: Capsule())
         .glassEffect(.regular)
     }
 }
@@ -191,7 +191,7 @@ struct GlassTextField: View {
             .font(.system(.body, design: .rounded))
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .background(Material.glass, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .glassEffect(.regular)
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
