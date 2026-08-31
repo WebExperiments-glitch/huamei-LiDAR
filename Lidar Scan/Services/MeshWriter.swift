@@ -65,7 +65,17 @@ enum MeshWriter {
         }
 
         if kind == .mesh {
-            for n in data.normals {
+            // 法线兜底：缺失或全零时按面重建（否则 f a//a 引用空法线 → 着色发暗/文件非法）
+            var normals = data.normals
+            if normals.count != data.vertices.count {
+                normals = computeFaceNormals(vertices: data.vertices, faces: data.faces)
+            } else {
+                let hasNonZero = normals.contains { simd_length($0) > 0.5 }
+                if !hasNonZero {
+                    normals = computeFaceNormals(vertices: data.vertices, faces: data.faces)
+                }
+            }
+            for n in normals {
                 text += String(format: "vn %.5f %.5f %.5f\n", n.x, n.y, n.z)
             }
             var faceLines = ""

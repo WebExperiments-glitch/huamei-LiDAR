@@ -43,6 +43,9 @@ final class CaptureViewModel: NSObject, ObservableObject {
     private var keyFrames: [KeyFrameSnapshot] = []
     /// 最近一帧（含相机图像），用于点云上色与深度图导出
     private var latestFrameSnapshot: FrameSnapshot?
+    /// 视觉帧（隔段采样的含图帧），用于多帧 best-view 上色
+    private var visualFrames: [FrameSnapshot] = []
+    private var visualFrameCounter = 0
     /// 结束扫描时生成的点云（纯 Swift 值）
     private var cachedMeshData: ScanMeshData?
     private var cachedSnapshot: FrameSnapshot?
@@ -56,6 +59,8 @@ final class CaptureViewModel: NSObject, ObservableObject {
         keyFrames.removeAll()
         latestFrameSnapshot = nil
         cachedMeshData = nil
+        visualFrames.removeAll()
+        visualFrameCounter = 0
 
         let configuration = ARWorldTrackingConfiguration()
         configuration.environmentTexturing = .automatic
@@ -110,10 +115,11 @@ final class CaptureViewModel: NSObject, ObservableObject {
         }
 
         let frames = keyFrames
+        let visualFrames = self.visualFrames
         isFinished = true
         arView.session.pause()
         isSessionRunning = false
-        statusMessage = "正在空中三角测量计算…"
+        statusMessage = "正在融合重建网格（TSDF）…"
         isProcessing = true
 
         // 后台：关键帧 → TSDF 融合 → 表面网格 → 上色 → 落盘 OBJ。
@@ -144,8 +150,13 @@ final class CaptureViewModel: NSObject, ObservableObject {
                 kind = .pointCloud
             }
 
-            // 用最近一帧相机画面给模型上色
-            if let colors = TextureMapper.sampleColors(vertices: mesh.vertices, snapshot: latest) {
+            // 多帧 best-view 上色（每顶点选“法线朝向相机、视角正对”的最佳帧取色）；
+            // 视觉帧不足时回退单帧
+            if let colors = TextureMapper.sampleColorsBestView(vertices: mesh.vertices,
+                                                               normals: mesh.normals,
+                                                               frames: visualFrames) {
+                mesh.colors = colors
+            } else if let colors = TextureMapper.sampleColors(vertices: mesh.vertices, snapshot: latest) {
                 mesh.colors = colors
             }
             guard !mesh.isEmpty else {
@@ -210,6 +221,8 @@ final class CaptureViewModel: NSObject, ObservableObject {
         keyFrames.removeAll()
         latestFrameSnapshot = nil
         cachedMeshData = nil
+        visualFrames.removeAll()
+        visualFrameCounter = 0
         cachedSnapshot = nil
         if let configuration = currentConfiguration {
             arView.session.run(configuration)
@@ -384,6 +397,12 @@ extension CaptureViewModel: ARSessionDelegate {
             guard let self else { return }
             self.latestFrameSnapshot = snapshot
             self.depthHeatmapImage = heatmap
+            // 每 8 个关键帧保留一张“视觉帧”用于多帧上色（≈2s 一张，内存有界）
+            self.visualFrameCounter += 1
+            if self.visualFrameCounter % 8 == 0 {
+                if self.visualFrames.count >= 40 { self.visualFrames.removeFirst() }
+                self.visualFrames.append(snapshot)
+            }
             if self.keyFrames.count >= Self.keyFrameLimit {
                 self.keyFrames.removeFirst()   // 循环缓冲：替换最旧帧
             }
@@ -391,8 +410,12 @@ extension CaptureViewModel: ARSessionDelegate {
         }
     }
 
-    /// 读取当前界面方向（线程无关）
+    /// 读取当前界面方向（优先前台活跃窗口场景；iPad 多窗口下不会拿错方向）
     private static nonisolated func readInterfaceOrientation() -> UIInterfaceOrientation {
+        if let scene = UIApplication.shared.connectedScenes
+            .first(where: { ($0 as? UIWindowScene)?.activationState == .foregroundActive }) as? UIWindowScene {
+            return scene.interfaceOrientation
+        }
         if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
             return scene.interfaceOrientation
         }

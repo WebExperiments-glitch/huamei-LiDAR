@@ -23,10 +23,10 @@ enum TSDFReconstruction {
     private static let maxWeight: Float = 20
     /// 提取前最小权重阈值（低于此视为噪声体素，置空）
     private static let minConfidentWeight: Float = 1
-    /// 置信度阈值：>0 即融合（ARKit 置信度值域不统一，防整场被过滤空）
+    /// 置信度阈值：>0 即保留（ARKit confidenceMap 值域为 0/1/2，0=low 不可靠，剔之）
     private static let confidenceThreshold: UInt8 = 1
-    /// 深度采样步长（1 = 全像素融合，表面更密实）
-    private static let samplingStep = 1
+    /// 深度采样步长（2 = 隔像素融合，速度/密度平衡；噪声已有中值滤波兜底）
+    private static let samplingStep = 2
     /// 帧数上限
     private static let frameLimit = 90
 
@@ -34,7 +34,9 @@ enum TSDFReconstruction {
 
     /// 用一批关键帧重建网格（世界坐标）。空数据抛 noMeshData。
     static func reconstruct(from frames: [KeyFrameSnapshot]) throws -> ScanMeshData {
-        let usedFrames = Array(frames.prefix(frameLimit))
+        // 循环缓冲中“最新帧”位姿更稳定、与最后一段扫描重叠更多——
+        // 取 suffix(最近 N 帧) 而不是 prefix(最旧 N 帧)，避免尾段数据被静默丢弃。
+        let usedFrames = Array(frames.suffix(frameLimit))
         guard !usedFrames.isEmpty else { throw ScanExportError.noMeshData }
 
         // 自适应场景包围盒：先用稀疏反投影点云估算 AABB，再建 TSDF 场
@@ -162,7 +164,7 @@ private struct TSDFVolume {
     let dimension: Int
 
     // 融合/提取参数
-    private static let samplingStep = 1
+    private static let samplingStep = 2
     private static let confidenceThreshold: UInt8 = 1
     private static let truncationVoxels = 6
     private static let maxWeight: Float = 20

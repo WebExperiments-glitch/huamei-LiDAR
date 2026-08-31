@@ -61,4 +61,63 @@ enum TextureMapper {
         // 一个像素都没采到（比如相机未就绪）视为失败，返回 nil
         return hitCount > 0 ? result : nil
     }
+
+    // MARK: - 多帧 best-view 上色
+
+    /// 对每个顶点，在多张视觉帧中选“最佳视角”——
+    /// 满足：在相机前方 + 法线朝向相机（点积>0.25）+ 投影在画内，
+    /// 且取最靠近相机的帧（近帧更清晰）。背面/遮挡面不会拿到错误颜色。
+    /// 视觉帧不足时回退到单帧上色。
+    static func sampleColorsBestView(vertices: [SIMD3<Float>],
+                                     normals: [SIMD3<Float>],
+                                     frames: [FrameSnapshot]) -> [SIMD3<Float>]? {
+        guard !vertices.isEmpty else { return nil }
+        guard frames.count >= 2 else {
+            return sampleColors(vertices: vertices, snapshot: frames.first)
+        }
+
+        var result = [SIMD3<Float>](repeating: .meshGray, count: vertices.count)
+        var bestScore = [Float](repeating: -1, count: vertices.count)
+        let nv = (normals.count == vertices.count)
+            ? normals
+            : [SIMD3<Float>](repeating: .zero, count: vertices.count)
+
+        for frame in frames {
+            guard let imageData = frame.imageData else { continue }
+            let w = frame.imageWidth, h = frame.imageHeight
+            guard w > 0, h > 0 else { continue }
+            let intrinsics = frame.intrinsics
+            let fx = intrinsics[0][0]
+            let fy = intrinsics[1][1]
+            let cx = intrinsics[2][0]
+            let cy = intrinsics[2][1]
+            let view = frame.viewMatrix
+
+            for i in 0..<vertices.count {
+                let camPoint = view * SIMD4<Float>(vertices[i].x, vertices[i].y, vertices[i].z, 1)
+                let z = camPoint.z
+                guard z < -0.05 else { continue }
+
+                // 法线朝向相机才可上色，掠射角过大跳过（减少拉伸错误色）
+                if nv[i].x != 0 || nv[i].y != 0 || nv[i].z != 0 {
+                    let toCamera = simd_normalize(SIMD3(-camPoint.x, -camPoint.y, -camPoint.z))
+                    guard simd_dot(nv[i], toCamera) > 0.25 else { continue }
+                }
+
+                let px = Int(fx * camPoint.x / (-z) + cx)
+                let py = Int(fy * camPoint.y / (-z) + cy)
+                guard px >= 0, px < w, py >= 0, py < h else { continue }
+
+                // 近帧更清晰，取最近可用帧
+                let score = 1.0 / max(-z, 0.01)
+                guard score > bestScore[i] else { continue }
+                bestScore[i] = score
+                let p = (py * w + px) * 4
+                result[i] = SIMD3(Float(imageData[p + 2]) / 255,
+                                  Float(imageData[p + 1]) / 255,
+                                  Float(imageData[p]) / 255)
+            }
+        }
+        return bestScore.contains { $0 > 0 } ? result : nil
+    }
 }
