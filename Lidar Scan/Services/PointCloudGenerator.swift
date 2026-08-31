@@ -73,10 +73,11 @@ enum PointCloudGenerator {
                 // 只保留合理距离内的有效深度
                 guard depth.isFinite, depth > 0.2, depth < 6.0 else { continue }
 
-                // 相机坐标（深度图即相机坐标系，可视为单位焦距）
-                let camX = (Float(x) - cx) / fx * depth
-                let camY = (Float(y) - cy) / fy * depth
-                let cam = SIMD4<Float>(camX, camY, depth, 1)
+                // 相机坐标（深度图沿相机 -Z 方向，ARKit +Z 指向后方）
+                let cam = SIMD4<Float>((Float(x) - cx) / fx * depth,
+                                       (Float(y) - cy) / fy * depth,
+                                       -depth,
+                                       1)
 
                 let world = (worldFromCamera * cam).xyz
                 if !world.x.isFinite || !world.y.isFinite || !world.z.isFinite { continue }

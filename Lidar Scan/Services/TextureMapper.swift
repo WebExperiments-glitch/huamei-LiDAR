@@ -38,12 +38,12 @@ enum TextureMapper {
             // 世界坐标 → 相机坐标（viewMatrix 已包含界面方向转换）
             let cameraPoint = viewMatrix * SIMD4<Float>(vertices[i].x, vertices[i].y, vertices[i].z, 1)
 
-            // 只在相机前方（z > 0）的顶点取色
+            // 只在相机前方取色（ARKit 相机坐标 +Z 指向后方 → 前方为 z < 0）
             let z = cameraPoint.z
-            guard z > 0 else { continue }
+            guard z < 0 else { continue }
 
-            let projectedX = fx * cameraPoint.x / z + cx
-            let projectedY = fy * cameraPoint.y / z + cy
+            let projectedX = fx * cameraPoint.x / (-z) + cx
+            let projectedY = fy * cameraPoint.y / (-z) + cy
             let x = Int(projectedX)
             let y = Int(projectedY)
             guard x >= 0, x < width, y >= 0, y < height else { continue }

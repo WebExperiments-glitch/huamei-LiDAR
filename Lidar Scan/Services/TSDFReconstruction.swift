@@ -16,18 +16,14 @@ enum TSDFReconstruction {
 
     // MARK: - 参数
 
-    /// 体积分辨率（体素数/边），192³ ≈ 1.5cm/体素 @3m 场景
+    /// 体积分辨率（体素数/边），内存恒定 ≈192³
     private static let dimension = 192
-    /// 场景边长（米）
-    private static let sizeMeters: Float = 3.0
-    /// 体素边长
-    private static let voxelSize: Float = sizeMeters / Float(dimension)
     /// TSDF 截断距离（体素个数），工业标定 ≈5-6
     private static let truncationVoxels = 6
     /// 权重封顶（防数值溢出/模型僵化，形成滑动记忆窗）
     private static let maxWeight: Float = 20
     /// 提取前最小权重阈值（低于此视为噪声体素，置空）
-    private static let minConfidentWeight: Float = 2
+    private static let minConfidentWeight: Float = 1
     /// 置信度阈值：仅融合 medium(85) 及以上的深度像素
     private static let confidenceThreshold: UInt8 = 85
     /// 深度采样步长（帧内每隔 n 像素）
@@ -40,19 +36,28 @@ enum TSDFReconstruction {
     /// 用一批关键帧重建网格（世界坐标）。空数据抛 noMeshData。
     static func reconstruct(from frames: [KeyFrameSnapshot]) throws -> ScanMeshData {
         let usedFrames = Array(frames.prefix(frameLimit))
-        guard !usedFrames.isEmpty,
-              let first = usedFrames.first else { throw ScanExportError.noMeshData }
+        guard !usedFrames.isEmpty else { throw ScanExportError.noMeshData }
 
-        // 以第一帧相机位置为场景中心原点
-        let cameraWorld = cameraPosition(of: first.viewMatrix)
-        let origin = cameraWorld - SIMD3<Float>(sizeMeters / 2,
-                                                sizeMeters / 2,
-                                                sizeMeters / 2)
+        // 自适应场景包围盒：先用稀疏反投影点云估算 AABB，再建 TSDF 场
+        // （对标 tsdf-fusion / owl-3d 的 vol_bnds 流程，避免固定框切掉物体）
+        let sceneBox = computeSceneBounds(from: usedFrames)
+        guard sceneBox != nil else { throw ScanExportError.noMeshData }
 
-        var volume = TSDFVolume(origin: origin,
-                                voxelSize: voxelSize,
-                                dimension: dimension)
+        var extent = sceneBox!.max - sceneBox!.min
+        extent.x = max(extent.x, 0.8)
+        extent.y = max(extent.y, 0.8)
+        extent.z = max(extent.z, 0.8)
 
+        let maxSpan = max(extent.x, max(extent.y, extent.z))
+        // 体素边长自适应（3m 场景≈1.5cm；整体限制 0.8cm~3cm）
+        let voxel = min(max(maxSpan / Float(dimension), 0.008), 0.03)
+
+        // 以场景中心为原点展开立方体，避免立方体单侧贴边
+        let center = sceneBox!.min + extent / 2
+        let half = voxel * Float(dimension) / 2
+        let origin = center - SIMD3<Float>(repeating: half)
+
+        var volume = TSDFVolume(origin: origin, voxelSize: voxel, dimension: dimension)
         for frame in usedFrames {
             volume.integrate(frame)
         }
@@ -62,10 +67,48 @@ enum TSDFReconstruction {
         return mesh
     }
 
-    private static func cameraPosition(of viewMatrix: simd_float4x4) -> SIMD3<Float> {
-        let worldFromCamera = viewMatrix.inverse
-        let p = worldFromCamera * SIMD4<Float>(0, 0, 0, 1)
-        return SIMD3(p.x, p.y, p.z)
+    // MARK: - 场景包围盒（稀疏反投影）
+
+    /// 遍历所有关键帧（大步长采样）把深度反投影成世界点，求 AABB。
+    /// 反投影采用苹果官方约定：相机坐标 z = -depth（ARKit +Z 指向相机后方）。
+    private static func computeSceneBounds(from frames: [KeyFrameSnapshot]) -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
+        var minP = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var maxP = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        var found = false
+        let step = 4
+
+        for frame in frames {
+            let width = frame.width
+            let height = frame.height
+            let depthValues = frame.depthValues
+            guard depthValues.count >= width * height else { continue }
+
+            let intrinsics = frame.intrinsics
+            let fx = intrinsics[0][0]
+            let fy = intrinsics[1][1]
+            let cx = intrinsics[2][0]
+            let cy = intrinsics[2][1]
+            let worldFromCamera = frame.viewMatrix.inverse
+
+            for y in stride(from: 0, to: height, by: step) {
+                for x in stride(from: 0, to: width, by: step) {
+                    let d = depthValues[y * width + x]
+                    guard d.isFinite, d > 0.3, d < 5.0 else { continue }
+                    let cam = SIMD4<Float>((Float(x) - cx) / fx * d,
+                                           (Float(y) - cy) / fy * d,
+                                           -d,     // 苹果官方约定：+Z 指向相机后方
+                                           1)
+                    let w = (worldFromCamera * cam).xyz
+                    guard w.x.isFinite, w.y.isFinite, w.z.isFinite,
+                          abs(w.x) < 100, abs(w.y) < 100, abs(w.z) < 100 else { continue }
+                    minP = simd_min(minP, w)
+                    maxP = simd_max(maxP, w)
+                    found = true
+                }
+            }
+        }
+        guard found else { return nil }
+        return (minP, maxP)
     }
 }
 
@@ -148,10 +191,10 @@ private struct TSDFVolume {
                 let depthValue = depthValues[p]
                 guard depthValue.isFinite, depthValue > 0.2, depthValue < 5.5 else { continue }
 
-                // 像素 → 相机坐标 → 世界坐标
+                // 像素 → 相机坐标 → 世界坐标（ARKit 相机 +Z 指向后方，z = -depth）
                 let camPoint = SIMD4<Float>((Float(x) - cx) / fx * depthValue,
                                             (Float(y) - cy) / fy * depthValue,
-                                            depthValue,
+                                            -depthValue,
                                             1)
                 let surfacePoint = (worldFromCamera * camPoint).xyz
                 guard surfacePoint.x.isFinite, surfacePoint.y.isFinite, surfacePoint.z.isFinite else { continue }
