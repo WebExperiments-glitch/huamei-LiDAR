@@ -238,9 +238,9 @@ final class CaptureViewModel: NSObject, ObservableObject {
     }
 
     /// 由深拷贝深度生成红黄绿热力图（近红→中黄→远绿）
-    static func makeDepthHeatmap(depth: [Float],
-                                 width: Int,
-                                 height: Int) -> UIImage? {
+    nonisolated static func makeDepthHeatmap(depth: [Float],
+                                             width: Int,
+                                             height: Int) -> UIImage? {
         guard width > 0, height > 0, depth.count >= width * height else { return nil }
 
         // 输出宽度固定 72（等比缩小），避免生成大图
