@@ -18,7 +18,8 @@
 
 ## 📱 要求
 
-- iOS 26.0+（Liquid Glass 需要；对应 Xcode 26）
+- 部署目标 **iOS 26.0**（Liquid Glass 需要；对应 Xcode 26）
+- 开发/验证环境为 **iOS / iPadOS 27**，向下兼容 iOS 26（部署目标即最低支持版本）
 - 真机：iPhone 12 Pro/13 Pro/14 Pro/15 Pro/16 Pro，或 2020 年后的 iPad Pro（带 LiDAR；模拟器不支持）
 - 支持 iPhone 与 iPad
 

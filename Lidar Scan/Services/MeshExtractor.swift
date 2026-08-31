@@ -5,10 +5,11 @@
 //  从 ARMeshAnchor 提取网格数据。
 //
 //  ⚠️ 关键安全约束：
-//  ARMeshAnchor 的 geometry 缓冲由 ARKit 内部工作线程持续更新，
-//  **只在 ARSessionDelegate 回调（didAdd / didUpdate）内部**读取才是安全的。
-//  本模块提供 snapshot(of:) 在回调窗口内把 bufffer 深拷贝为纯 Swift 值，
-//  之后（后台线程/结束扫描）只允许使用这些已拷贝的值。
+//  1. ARMeshAnchor 的 geometry 缓冲由 ARKit 内部线程持续更新，只在
+//     ARSessionDelegate 回调（didAdd / didUpdate）内读取，并立即深拷贝。
+//  2. 即使是回调窗口内，缓冲也正在被系统重建 —— 任何指针访问都必须
+//     先用 MTLBuffer 的真实 length 校验边界，越界一律跳过而非读取。
+//     这是防 SIGSEGV 指针越界的最后一道闸。
 //
 
 import ARKit
@@ -26,49 +27,62 @@ enum MeshExtractor {
     }
 
     /// 在 ARSessionDelegate 回调内调用：把 anchor 的几何深拷贝出来。
-    /// 此后可安全地在任意线程使用返回的值。
-    /// 含防御性校验：异常几何量级会被忽略（返回空快照），不参与后续流程。
+    /// 之后可安全地在任意线程使用返回的值。
+    /// 所有 buffer 访问都先做边界校验，异常/越界一律返回空快照，绝不裸读。
     static func snapshot(of anchor: ARMeshAnchor) -> MeshAnchorSnapshot {
         let geometry = anchor.geometry
         let vertexCount = geometry.vertices.count
-        // 防御：数量异常（0 或超大）视为无效锚点，直接返回空快照
+
+        // 防御 1：数量异常（0 / 超大）视为无效
         guard vertexCount > 0, vertexCount <= 5_000_000 else {
-            return MeshAnchorSnapshot(identifier: anchor.identifier,
-                                      transform: anchor.transform,
-                                      vertices: [],
-                                      normals: [],
-                                      faces: [])
+            return emptySnapshot(of: anchor)
         }
 
         var vertices = [SIMD3<Float>](repeating: .zero, count: vertexCount)
         var normals = [SIMD3<Float>](repeating: .zero, count: vertexCount)
         var faces: [UInt32] = []
 
-        // 顶点（深拷贝为纯 Swift 数组）
-        let vertexPtr = geometry.vertices.buffer.contents()
-            .advanced(by: geometry.vertices.offset)
-            .assumingMemoryBound(to: SIMD3<Float>.self)
-        for i in 0..<vertexCount { vertices[i] = vertexPtr[i] }
-
-        // 法线（可能存在也可能为空）
-        if geometry.normals.count == vertexCount {
-            let normalPtr = geometry.normals.buffer.contents()
-                .advanced(by: geometry.normals.offset)
+        // 防御 2：顶点缓冲边界校验（offset + 期望字节数 <= 实际 length）
+        let vertexBytes = geometry.vertices.stride * vertexCount
+        if vertexBytes > 0,
+           geometry.vertices.offset + vertexBytes <= geometry.vertices.buffer.length {
+            let vertexPtr = geometry.vertices.buffer.contents()
+                .advanced(by: geometry.vertices.offset)
                 .assumingMemoryBound(to: SIMD3<Float>.self)
-            for i in 0..<vertexCount { normals[i] = normalPtr[i] }
+            for i in 0..<vertexCount { vertices[i] = vertexPtr[i] }
+        } else {
+            // 缓冲被系统收缩/替换，读它会越界 → 放弃本锚点
+            return emptySnapshot(of: anchor)
         }
 
-        // 面索引（仅支持 4 字节索引）
+        // 防御 3：法线缓冲边界校验（存在性 + 长度）
+        if geometry.normals.count == vertexCount {
+            let normalBytes = geometry.normals.stride * vertexCount
+            if normalBytes > 0,
+               geometry.normals.offset + normalBytes <= geometry.normals.buffer.length {
+                let normalPtr = geometry.normals.buffer.contents()
+                    .advanced(by: geometry.normals.offset)
+                    .assumingMemoryBound(to: SIMD3<Float>.self)
+                for i in 0..<vertexCount { normals[i] = normalPtr[i] }
+            }
+        }
+
+        // 防御 4：面索引边界校验（仅支持 4 字节索引）
         let faceCount = geometry.faces.count
         let indicesPerFace = geometry.faces.indexCountPerPrimitive
         if faceCount > 0, indicesPerFace > 0, geometry.faces.bytesPerIndex == 4 {
             let total = faceCount * indicesPerFace
-            faces.reserveCapacity(total)
-            let ptr = geometry.faces.buffer.contents().assumingMemoryBound(to: UInt32.self)
-            for i in 0..<total {
-                let index = ptr[i]
-                if Int(index) < vertexCount {   // 防御：丢弃越界索引
-                    faces.append(index)
+            let indexBytes = geometry.faces.bytesPerIndex * total
+            if geometry.faces.offset + indexBytes <= geometry.faces.buffer.length {
+                faces.reserveCapacity(total)
+                let ptr = geometry.faces.buffer.contents()
+                    .advanced(by: geometry.faces.offset)
+                    .assumingMemoryBound(to: UInt32.self)
+                for i in 0..<total {
+                    let index = ptr[i]
+                    if Int(index) < vertexCount {   // 防御：丢弃越界索引
+                        faces.append(index)
+                    }
                 }
             }
         }
@@ -78,6 +92,15 @@ enum MeshExtractor {
                                   vertices: vertices,
                                   normals: normals,
                                   faces: faces)
+    }
+
+    /// 生成空快照（buildMesh 会跳过它）
+    private static func emptySnapshot(of anchor: ARMeshAnchor) -> MeshAnchorSnapshot {
+        MeshAnchorSnapshot(identifier: anchor.identifier,
+                           transform: anchor.transform,
+                           vertices: [],
+                           normals: [],
+                           faces: [])
     }
 
     /// 把若干锚点快照合并成一个统一的网格数据集（世界坐标、全局索引）。
