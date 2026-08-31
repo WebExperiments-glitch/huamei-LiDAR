@@ -82,7 +82,7 @@ final class CaptureViewModel: NSObject, ObservableObject {
         arView.session.delegate = self
         arView.session.run(configuration)
         currentConfiguration = configuration
-        statusMessage = "请缓慢移动设备，环绕目标扫描（建议 40 秒内完成）"
+        statusMessage = "缓慢环绕扫描，距墙面/物体 1~2 米，避免快速移动"
     }
 
     /// 暂停 / 继续

@@ -44,13 +44,15 @@ enum TSDFReconstruction {
         guard let sceneBox = sceneBox else { throw ScanExportError.noMeshData }
 
         var extent = sceneBox.max - sceneBox.min
-        extent.x = max(extent.x, 0.9)
-        extent.y = max(extent.y, 0.9)
-        extent.z = max(extent.z, 0.9)
+        extent.x = max(extent.x, 1.2)
+        extent.y = max(extent.y, 1.2)
+        extent.z = max(extent.z, 1.2)
 
         let maxSpan = max(extent.x, max(extent.y, extent.z))
-        // 体素边长自适应（1.5~3.5cm）：较粗体素更平滑、面数更少、文件更小
-        let voxel = min(max(maxSpan / Float(dimension), 0.015), 0.035)
+        // 体素边长自适应（3~5cm）：房间级远距深度噪声可达 ±2~4cm，
+        // 体素必须覆盖噪声量级（否则表面在噪声带内横跳 → 满屏碎面/拉丝）。
+        // 同时大幅降面数 → 文件小、预览流畅。
+        let voxel = min(max(maxSpan / Float(dimension), 0.03), 0.05)
 
         // 以场景中心为原点展开立方体，避免单侧贴边
         let center = sceneBox.min + extent / 2
@@ -267,31 +269,30 @@ private struct TSDFVolume {
 
     // MARK: 深度预处理（来自 Open3D/移动端重建管线共识）
 
-    /// 3×3 中值滤波：剔除 LiDAR 脉冲噪声点（对孤立异常深度像素直接替换为邻域中值）。
-    /// 仅在每帧融合前对深度数组做一次，消除表面“麻点/拉丝/撕裂”。
+    /// 深度中值滤波：剔除远距离 LiDAR 脉冲/多路径噪声。
+    /// 5×5 窗口（房间级 2~6m 噪声更强，3×3 压制不足）。
     private static func medianFilterDepth(_ src: [Float],
                                           _ width: Int,
                                           _ height: Int) -> [Float] {
         var out = src
-        guard width > 2, height > 2 else { return out }
-        for y in 1..<(height - 1) {
-            var row = y * width
-            for x in 1..<(width - 1) {
+        guard width > 4, height > 4 else { return out }
+        let radius = 2
+        for y in radius..<(height - radius) {
+            for x in radius..<(width - radius) {
                 var values = [Float]()
-                values.reserveCapacity(9)
-                for dy in -1...1 {
+                values.reserveCapacity(25)
+                for dy in -radius...radius {
                     let ny = (y + dy) * width
-                    for dx in -1...1 {
+                    for dx in -radius...radius {
                         let d = src[ny + x + dx]
                         if d > 0.2 { values.append(d) }
                     }
                 }
                 if !values.isEmpty {
                     values.sort()
-                    out[row + x] = values[values.count / 2]
+                    out[y * width + x] = values[values.count / 2]
                 }
             }
-            row += width
         }
         return out
     }
