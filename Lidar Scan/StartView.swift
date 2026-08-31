@@ -24,19 +24,16 @@ struct StartView: View {
 
                     // Logo / 标题
                     ZStack {
-                        Circle()
-                            .fill(
-                                LinearGradient(colors: [Color(red: 0.45, green: 0.35, blue: 0.95),
-                                                        Color(red: 0.16, green: 0.55, blue: 0.95)],
-                                               startPoint: .topLeading,
-                                               endPoint: .bottomTrailing)
-                            )
+                        // huamei 动漫角色（AI 生成的 Q 版形象）
+                        Image("Mascot")
+                            .resizable()
+                            .scaledToFill()
                             .frame(width: 96, height: 96)
-                            .shadow(color: Color(red: 0.3, green: 0.4, blue: 1.0).opacity(0.5),
-                                    radius: 22, y: 8)
-                        Image(systemName: "view.3d")
-                            .font(.system(size: 42, weight: .medium))
-                            .foregroundStyle(.white)
+                            .clipShape(Circle())
+                            .overlay(
+                                Circle().strokeBorder(Color.white.opacity(0.25), lineWidth: 1)
+                            )
+                            .shadow(color: .black.opacity(0.35), radius: 14, x: 0, y: 8)
                     }
                     .padding(.bottom, 4)
 
@@ -82,7 +79,33 @@ struct StartView: View {
                                 .font(.system(.caption, design: .rounded))
                         }
                         .foregroundStyle(.white.opacity(0.4))
-                        .padding(.bottom, 32)
+                        .padding(.bottom, 20)
+
+                        // 开源信息
+                        VStack(spacing: 10) {
+                            Link(destination: URL(string: "https://github.com/WebExperiments-glitch/huamei-LiDAR")!) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "arrow.up.right.square")
+                                        .font(.system(size: 13, weight: .semibold))
+                                    Text("GitHub · huamei-LiDAR")
+                                        .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                                }
+                                .foregroundStyle(.white.opacity(0.75))
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 9)
+                                .background(.white.opacity(0.10), in: Capsule())
+                            }
+
+                            Text("本应用基于 MIT 开源协议发布，核心源于 SwiftLiDAR 项目；\n源码与许可声明详见上方 GitHub 仓库。")
+                                .font(.system(.caption2, design: .rounded))
+                                .multilineTextAlignment(.center)
+                                .foregroundStyle(.white.opacity(0.35))
+
+                            Text("huamei-LiDAR · V0.1 RC")
+                                .font(.system(.caption2, design: .rounded, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.3))
+                        }
+                        .padding(.bottom, 16)
                     } else {
                         VStack(spacing: 10) {
                             Image(systemName: "exclamationmark.triangle")

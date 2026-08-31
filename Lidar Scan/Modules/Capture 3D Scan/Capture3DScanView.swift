@@ -94,6 +94,26 @@ struct Capture3DScanView: View {
             .padding(.bottom, 24)
             .frame(maxHeight: .infinity, alignment: .bottom)
 
+            // 结束扫描后的计算遮罩（空三 / 生成模型）
+            if viewModel.isProcessing {
+                Color.black.opacity(0.55)
+                    .ignoresSafeArea()
+                    .overlay {
+                        GlassCard {
+                            VStack(spacing: 14) {
+                                ProgressView()
+                                    .tint(.white)
+                                Text("正在空中三角测量计算…")
+                                    .font(.system(.body, design: .rounded, weight: .semibold))
+                                Text("正在生成模型，请稍候")
+                                    .font(.system(.caption, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.6))
+                            }
+                        }
+                    }
+                    .transition(.opacity)
+            }
+
             // 导出中遮罩
             if viewModel.isExporting {
                 Color.black.opacity(0.35)
@@ -112,6 +132,13 @@ struct Capture3DScanView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: viewModel.isExporting)
+        .animation(.easeInOut(duration: 0.2), value: viewModel.isProcessing)
+        .onChange(of: viewModel.didFinishScan) { finished in
+            if finished {
+                // 空三与落盘完成 → 自动退回主界面，去「查看扫描模型」栏
+                mode.wrappedValue.dismiss()
+            }
+        }
         .sheet(isPresented: $showExportSheet) {
             ExportOptionsSheetView(viewModel: viewModel)
         }

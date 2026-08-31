@@ -24,6 +24,10 @@ final class CaptureViewModel: NSObject, ObservableObject {
     @Published var isSessionRunning = true
     /// 是否已完成「结束扫描」并物化好数据（只允许在已结束时导出）
     @Published var isFinished = false
+    /// 结束后的计算/落盘阶段（显示「空中三角测量计算中…」遮罩）
+    @Published var isProcessing = false
+    /// 落盘完成，页面应自动退出回主界面
+    @Published var didFinishScan = false
     @Published var showDebugMesh = true
     @Published var isExporting = false
     @Published var statusMessage: String?
@@ -120,7 +124,37 @@ final class CaptureViewModel: NSObject, ObservableObject {
         isFinished = true
         cachedMeshData = meshData
         cachedSnapshot = snapshot
-        statusMessage = "扫描已结束，模型已生成，可导出"
+        statusMessage = "正在空中三角测量计算…"
+        isProcessing = true
+
+        // 后台：给顶点采样相机颜色 → 自动落盘一份 OBJ 供列表查看
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var finalMesh = meshData
+            if let colors = TextureMapper.sampleColors(vertices: meshData.vertices, snapshot: snapshot) {
+                finalMesh.colors = colors
+            }
+            let options = ExportOptions(fileName: ScanFileExporter.defaultName(),
+                                        format: .obj,
+                                        contentKind: .mesh,
+                                        textured: false,
+                                        exportDepth: false)
+            do {
+                _ = try ScanFileExporter.run(data: finalMesh, options: options, snapshot: snapshot)
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.isProcessing = false
+                    self.didFinishScan = true
+                }
+            } catch {
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.isProcessing = false
+                    self.isFinished = false
+                    self.statusMessage = "模型保存失败，请重试"
+                    self.alertMessage = error.localizedDescription
+                }
+            }
+        }
         return true
     }
 

@@ -245,7 +245,16 @@ struct ScanViewerView: View {
     @State private var measureMode = false
     @State private var measureResultText = ""
     @State private var modelDimensions = ""
-    @State private var showShare = false
+    @State private var shareContent: ShareContent?
+    @State private var noteMessage: String?
+    @State private var isConverting = false
+
+    private var noteBinding: Binding<Bool> {
+        Binding(
+            get: { noteMessage != nil },
+            set: { if !$0 { noteMessage = nil } }
+        )
+    }
 
     var body: some View {
         ZStack {
@@ -289,13 +298,58 @@ struct ScanViewerView: View {
                                 .offset(x: 4, y: -4)
                         }
                     }
-                    GlassIconButton(systemImage: "square.and.arrow.up") {
-                        showShare = true
+                    // 右上角操作菜单（•••）：分享 / 导出多种格式
+                    Menu {
+                        Button {
+                            shareContent = ShareContent(urls: [item.url])
+                        } label: {
+                            Label("分享此模型", systemImage: "square.and.arrow.up")
+                        }
+                        Divider()
+                        Text("导出为…")
+                        ForEach(ScanExportFormat.allCases) { format in
+                            Button {
+                                exportAs(format)
+                            } label: {
+                                Label("\(format.rawValue)（\(format.fileExtension)）",
+                                      systemImage: formatMenuIcon(format))
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 44, height: 44)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .glassEffect(.regular)
+                            .overlay(
+                                Circle().strokeBorder(
+                                    LinearGradient(colors: [Color.white.opacity(0.4), Color.white.opacity(0.06)],
+                                                   startPoint: .top, endPoint: .bottom),
+                                    lineWidth: 1
+                                )
+                            )
                     }
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
                 Spacer()
+            }
+
+            // 转换导出中
+            if isConverting {
+                Color.black.opacity(0.45)
+                    .ignoresSafeArea()
+                    .overlay {
+                        GlassCard {
+                            HStack(spacing: 12) {
+                                ProgressView()
+                                    .tint(.white)
+                                Text("正在转换格式…")
+                                    .font(.system(.body, design: .rounded, weight: .semibold))
+                            }
+                        }
+                    }
             }
 
             // 测量结果 / 尺寸
@@ -333,10 +387,61 @@ struct ScanViewerView: View {
         .onAppear {
             loadedScene = try? SCNScene(url: item.url)
         }
-        .sheet(isPresented: $showShare) {
-            ShareSheet(items: [item.url])
+        .sheet(item: $shareContent) { content in
+            ShareSheet(items: content.urls.map { $0 as Any })
+        }
+        .alert("提示", isPresented: noteBinding) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(noteMessage ?? "")
         }
         .toolbar(.hidden, for: .navigationBar)
+    }
+
+    // MARK: 多格式转换导出
+
+    private func exportAs(_ format: ScanExportFormat) {
+        guard !isConverting else { return }
+        guard let directory = ScanFileExporter.scanDirectory() else {
+            noteMessage = "无法访问文档目录"
+            return
+        }
+
+        let sourceURL = item.url
+        let baseName = item.name
+        isConverting = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                // 解析当前 OBJ → 重建网格数据 → 写出目标格式
+                let mesh = try OBJParser.parse(url: sourceURL)
+                let fileName = ScanFileExporter.uniqueBaseName(raw: baseName,
+                                                               ext: format.fileExtension,
+                                                               in: directory)
+                let targetURL = directory.appendingPathComponent(fileName + "." + format.fileExtension)
+                try MeshWriter.write(mesh, kind: .mesh, format: format, to: targetURL)
+
+                Task { @MainActor in
+                    isConverting = false
+                    shareContent = ShareContent(urls: [targetURL])
+                }
+            } catch {
+                Task { @MainActor in
+                    isConverting = false
+                    noteMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func formatMenuIcon(_ format: ScanExportFormat) -> String {
+        switch format {
+        case .obj: return "doc.richtext"
+        case .ply: return "point.3.connected.trianglepath.dotted"
+        case .stl: return "cube"
+        case .glb: return "cube.box"
+        case .usdz: return "arkit"
+        }
     }
 }
 
