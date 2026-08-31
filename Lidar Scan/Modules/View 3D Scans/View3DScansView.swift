@@ -7,6 +7,7 @@
 
 import SwiftUI
 import SceneKit
+import simd
 
 // MARK: - 分享内容（sheet 需要 Identifiable）
 
@@ -415,12 +416,38 @@ struct ScanViewerView: View {
         let positions = mesh.vertices.map { SCNVector3($0.x, $0.y, $0.z) }
         guard !positions.isEmpty else { return nil }
         let vertexSource = SCNGeometrySource(vertices: positions)
+
+        var sources: [SCNGeometrySource] = [vertexSource]
+        // 顶点色：若解析到 RGB，则作为 color 语义 source 一并给渲染器
+        if let colors = mesh.colors, colors.count == positions.count {
+            var rgba = [SIMD4<Float>](repeating: SIMD4(1, 1, 1, 1), count: colors.count)
+            for i in 0..<colors.count {
+                rgba[i] = SIMD4(min(max(colors[i].x, 0), 1),
+                                min(max(colors[i].y, 0), 1),
+                                min(max(colors[i].z, 0), 1),
+                                1)
+            }
+            let stride = MemoryLayout<SIMD4<Float>>.stride
+            let colorData = rgba.withUnsafeBytes { Data($0) }
+            let colorSource = SCNGeometrySource(data: colorData,
+                                                semantic: .color,
+                                                vectorCount: rgba.count,
+                                                usesFloatComponents: true,
+                                                componentsPerVector: 4,
+                                                bytesPerComponent: 4,
+                                                dataOffset: 0,
+                                                dataStride: stride)
+            sources.append(colorSource)
+        }
+
         let indices = Array(0..<positions.count).map { Int32($0) }
         let element = SCNGeometryElement(indices: indices, primitiveType: .point)
-        let geometry = SCNGeometry(sources: [vertexSource], elements: [element])
+        let geometry = SCNGeometry(sources: sources, elements: [element])
         let material = SCNMaterial()
         material.isDoubleSided = true
-        material.diffuse.contents = UIColor(white: 0.45, alpha: 1.0)
+        // 纯顶点色渲染：constant 光照 + 白 diffuse，颜色完全来自顶点，不被灯光扭曲
+        material.lightingModel = .constant
+        material.diffuse.contents = UIColor.white
         geometry.materials = [material]
         let scene = SCNScene()
         scene.rootNode.addChildNode(SCNNode(geometry: geometry))
